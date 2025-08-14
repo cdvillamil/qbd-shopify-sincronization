@@ -60,5 +60,36 @@ const server = app.listen(PORT, () => {
   const baseUrl = `http://localhost:${PORT}${BASE_PATH}`;
   console.log(`[QBWC SOAP] Listening on ${baseUrl}`);
 });
-soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
+// 👇 IMPORTANTE: guarda el objeto devuelto por soap.listen
+const soapServer = soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
+
+// (opcional) reduce ruido en logs
+soapServer.log = (type, data) => {
+  if (type === 'received' || type === 'replied') return;
+  console.log(`[SOAP] ${type}`, (data && data.substring) ? data.substring(0, 120) + '…' : data);
+};
+
+// ⬇️ Guarda el authenticate REQUEST (node-soap emite 'request')
+soapServer.on('request', (xml, methodName) => {
+  if (methodName === 'authenticate') {
+    try {
+      fs.writeFileSync('/tmp/last-auth-request.xml', xml, 'utf8');
+      console.log('[SOAP] authenticate REQUEST length:', xml.length);
+    } catch (e) {
+      console.error('Failed to save last-auth-request:', e);
+    }
+  }
+});
+
+// ⬇️ Algunas versiones también emiten 'response' (no siempre)
+soapServer.on('response', (xml, methodName) => {
+  if (methodName === 'authenticate') {
+    try {
+      fs.writeFileSync('/tmp/last-auth-response.xml', xml, 'utf8');
+      console.log('[SOAP] authenticate RESPONSE length:', xml.length);
+    } catch (e) {
+      console.error('Failed to save last-auth-response:', e);
+    }
+  }
+});
 
