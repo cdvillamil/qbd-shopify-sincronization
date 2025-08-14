@@ -44,14 +44,14 @@ app.get('/debug/last-auth-response', (req, res) => {
   }
 });
 
-// ⬇️ NUEVO: ver el último authenticate REQUEST (XML que envía el cliente)
+// Ver el último authenticate REQUEST (lo que envía WC/Postman)
 app.get('/debug/last-auth-request', (req, res) => {
   const p = '/tmp/last-auth-request.xml';
   if (!fs.existsSync(p)) return res.status(404).send('no auth request yet');
   res.type('text/xml').send(fs.readFileSync(p, 'utf8'));
 });
 
-
+/* ---------- SOAP ---------- */
 const wsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl');
 const wsdlXml = fs.readFileSync(wsdlPath, 'utf8');
 const serviceObject = qbwcServiceFactory();
@@ -60,6 +60,7 @@ const server = app.listen(PORT, () => {
   const baseUrl = `http://localhost:${PORT}${BASE_PATH}`;
   console.log(`[QBWC SOAP] Listening on ${baseUrl}`);
 });
+
 // 👇 IMPORTANTE: guarda el objeto devuelto por soap.listen
 const soapServer = soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
 
@@ -92,4 +93,3 @@ soapServer.on('response', (xml, methodName) => {
     }
   }
 });
-
