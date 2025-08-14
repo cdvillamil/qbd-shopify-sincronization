@@ -62,15 +62,3 @@ const server = app.listen(PORT, () => {
 });
 soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
 
-// ⬇️ NUEVO: node-soap emite 'request' (no 'response')
-soapServer.on('request', (xml, methodName) => {
-  if (methodName === 'authenticate') {
-    try {
-      fs.writeFileSync('/tmp/last-auth-request.xml', xml, 'utf8');
-      console.log('[SOAP] authenticate REQUEST length:', xml.length);
-    } catch (e) {
-      console.error('Failed to save last-auth-request:', e);
-    }
-  }
-});
-
