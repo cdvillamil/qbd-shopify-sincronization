@@ -10,14 +10,26 @@ function qbwcServiceFactory() {
         serverVersion(args, cb) { cb(null, { serverVersionResult: '1.0.0-dev' }); },
         clientVersion(args, cb) { cb(null, { clientVersionResult: '' }); },
         authenticate(args, cb) {
-          const user = (args && args.strUserName) || '';
-          const pass = (args && args.strPassword) || '';
-          const EXPECTED_USER = process.env.WC_USERNAME || 'dev_sync_user';
-          const EXPECTED_PASS = process.env.WC_PASSWORD || 'your-dev-password';
-          if (user !== EXPECTED_USER || pass !== EXPECTED_PASS) return cb(null, { authenticateResult: ['','nvu'] });
+          const user = args?.strUserName || '';
+          const pass = args?.strPassword || '';
+
+          const EXPECTED_USER = process.env.WC_USERNAME;
+          const EXPECTED_PASS = process.env.WC_PASSWORD;
+          const PERMISSIVE    = process.env.AUTH_PERMISSIVE === '1';
+
+          console.log(`[QBWC] auth attempt user="${user}" matchUser=${user===EXPECTED_USER} passLen=${(pass||'').length}`);
+
+          const ok = PERMISSIVE || (user === EXPECTED_USER && pass === EXPECTED_PASS);
+          const { v4: uuidv4 } = require('uuid');
+
+          if (!ok) {
+            // con ArrayOfString en el WSDL, el array se devuelve como { string: [...] }
+            return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
+          }
+
           const ticket = uuidv4();
-          SESSIONS.set(ticket, { step: 0, lastError: '' });
-          return cb(null, { authenticateResult: [ticket, ''] });
+          // 2º string NO vacío para evitar el bug del WC con cadenas vacías
+          return cb(null, { authenticateResult: { string: [ticket, 'none'] } });
         },
         sendRequestXML(args, cb) {
           const ticket = args && args.ticket;
