@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions name="QBWebConnectorSvc"
+  targetNamespace="http://developer.intuit.com/"
+  xmlns:tns="http://developer.intuit.com/"
+  xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:soap-enc="http://schemas.xmlsoap.org/soap/encoding/"
+  xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+
+  <types>
+    <xsd:schema targetNamespace="http://developer.intuit.com/">
+      <xsd:import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>
+      <xsd:import namespace="http://schemas.xmlsoap.org/wsdl/"/>
+      <xsd:import namespace="http://www.w3.org/2001/XMLSchema"/>
+    </xsd:schema>
+  </types>
+
+  <message name="serverVersionRequest"/>
+  <message name="serverVersionResponse">
+    <part name="serverVersionResult" type="xsd:string"/>
+  </message>
+
+  <message name="clientVersionRequest">
+    <part name="strVersion" type="xsd:string"/>
+  </message>
+  <message name="clientVersionResponse">
+    <part name="clientVersionResult" type="xsd:string"/>
+  </message>
+
+  <message name="authenticateRequest">
+    <part name="strUserName" type="xsd:string"/>
+    <part name="strPassword" type="xsd:string"/>
+  </message>
+  <message name="authenticateResponse">
+    <part name="authenticateResult" type="soap-enc:Array"/>
+  </message>
+
+  <message name="sendRequestXMLRequest">
+    <part name="ticket" type="xsd:string"/>
+    <part name="strHCPResponse" type="xsd:string"/>
+    <part name="strCompanyFileName" type="xsd:string"/>
+    <part name="qbXMLCountry" type="xsd:string"/>
+    <part name="qbXMLMajorVers" type="xsd:int"/>
+    <part name="qbXMLMinorVers" type="xsd:int"/>
+  </message>
+  <message name="sendRequestXMLResponse">
+    <part name="sendRequestXMLResult" type="xsd:string"/>
+  </message>
+
+  <message name="receiveResponseXMLRequest">
+    <part name="ticket" type="xsd:string"/>
+    <part name="response" type="xsd:string"/>
+    <part name="hresult" type="xsd:string"/>
+    <part name="message" type="xsd:string"/>
+  </message>
+  <message name="receiveResponseXMLResponse">
+    <part name="receiveResponseXMLResult" type="xsd:int"/>
+  </message>
+
+  <message name="getLastErrorRequest">
+    <part name="ticket" type="xsd:string"/>
+  </message>
+  <message name="getLastErrorResponse">
+    <part name="getLastErrorResult" type="xsd:string"/>
+  </message>
+
+  <message name="connectionErrorRequest">
+    <part name="ticket" type="xsd:string"/>
+    <part name="hresult" type="xsd:string"/>
+    <part name="message" type="xsd:string"/>
+  </message>
+  <message name="connectionErrorResponse">
+    <part name="connectionErrorResult" type="xsd:string"/>
+  </message>
+
+  <message name="closeConnectionRequest">
+    <part name="ticket" type="xsd:string"/>
+  </message>
+  <message name="closeConnectionResponse">
+    <part name="closeConnectionResult" type="xsd:string"/>
+  </message>
+
+  <portType name="QBWebConnectorSvcPortType">
+    <operation name="serverVersion">
+      <input message="tns:serverVersionRequest"/>
+      <output message="tns:serverVersionResponse"/>
+    </operation>
+    <operation name="clientVersion">
+      <input message="tns:clientVersionRequest"/>
+      <output message="tns:clientVersionResponse"/>
+    </operation>
+    <operation name="authenticate">
+      <input message="tns:authenticateRequest"/>
+      <output message="tns:authenticateResponse"/>
+    </operation>
+    <operation name="sendRequestXML">
+      <input message="tns:sendRequestXMLRequest"/>
+      <output message="tns:sendRequestXMLResponse"/>
+    </operation>
+    <operation name="receiveResponseXML">
+      <input message="tns:receiveResponseXMLRequest"/>
+      <output message="tns:receiveResponseXMLResponse"/>
+    </operation>
+    <operation name="getLastError">
+      <input message="tns:getLastErrorRequest"/>
+      <output message="tns:getLastErrorResponse"/>
+    </operation>
+    <operation name="connectionError">
+      <input message="tns:connectionErrorRequest"/>
+      <output message="tns:connectionErrorResponse"/>
+    </operation>
+    <operation name="closeConnection">
+      <input message="tns:closeConnectionRequest"/>
+      <output message="tns:closeConnectionResponse"/>
+    </operation>
+  </portType>
+
+  <binding name="QBWebConnectorSvcSoapBinding" type="tns:QBWebConnectorSvcPortType">
+    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <operation name="serverVersion">
+      <soap:operation soapAction="http://developer.intuit.com/serverVersion"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="clientVersion">
+      <soap:operation soapAction="http://developer.intuit.com/clientVersion"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="authenticate">
+      <soap:operation soapAction="http://developer.intuit.com/authenticate"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="sendRequestXML">
+      <soap:operation soapAction="http://developer.intuit.com/sendRequestXML"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="receiveResponseXML">
+      <soap:operation soapAction="http://developer.intuit.com/receiveResponseXML"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="getLastError">
+      <soap:operation soapAction="http://developer.intuit.com/getLastError"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="connectionError">
+      <soap:operation soapAction="http://developer.intuit.com/connectionError"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+    <operation name="closeConnection">
+      <soap:operation soapAction="http://developer.intuit.com/closeConnection"/>
+      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+    </operation>
+  </binding>
+
+  <service name="QBWebConnectorSvc">
+    <port name="QBWebConnectorSvcSoap" binding="tns:QBWebConnectorSvcSoapBinding">
+      <soap:address location="http://localhost:3000/qbwc"/>
+    </port>
+  </service>
+</definitions>
