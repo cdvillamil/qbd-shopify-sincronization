@@ -16,6 +16,20 @@ const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 app.get('/healthz', (req, res) => res.status(200).json({ ok: true }));
 
+app.use(BASE_PATH, (req, res, next) => {
+  try {
+    fs.appendFileSync(
+      '/home/LogFiles/qbwc.log',
+      `${new Date().toISOString()} ${req.method} ${req.originalUrl}\n`
+    );
+  } catch (_) {}
+  next();
+});
+
+/* ---------------- Health & Debug ---------------- */
+
+app.get('/healthz', (req, res) => res.status(200).json({ ok: true }));
+
 app.get('/debug/config', (req, res) => {
   res.json({
     user: process.env.WC_USERNAME || null,
@@ -24,6 +38,7 @@ app.get('/debug/config', (req, res) => {
   });
 });
 
+// Último XML que guardamos desde receiveResponseXML (tu servicio lo escribe en /tmp)
 app.get('/debug/last-response', (req, res) => {
   try {
     const p = '/tmp/qbwc-last-response.xml';
@@ -34,9 +49,21 @@ app.get('/debug/last-response', (req, res) => {
   }
 });
 
+// Último authenticate REQUEST (lo que envía WC/Postman)
+app.get('/debug/last-auth-request', (req, res) => {
+  try {
+    const p = '/home/LogFiles/last-auth-request.xml';
+    if (!fs.existsSync(p)) return res.status(404).send('no auth request yet');
+    res.type('text/xml').send(fs.readFileSync(p, 'utf8'));
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
+});
+
+// (Opcional) authenticate RESPONSE (no todas las versiones lo emiten)
 app.get('/debug/last-auth-response', (req, res) => {
   try {
-    const p = '/tmp/last-auth-response.xml';
+    const p = '/home/LogFiles/last-auth-response.xml';
     if (!fs.existsSync(p)) return res.status(404).send('no auth response yet');
     res.type('text/xml').send(fs.readFileSync(p, 'utf8'));
   } catch (e) {
@@ -44,14 +71,8 @@ app.get('/debug/last-auth-response', (req, res) => {
   }
 });
 
-// Ver el último authenticate REQUEST (lo que envía WC/Postman)
-app.get('/debug/last-auth-request', (req, res) => {
-  const p = '/tmp/last-auth-request.xml';
-  if (!fs.existsSync(p)) return res.status(404).send('no auth request yet');
-  res.type('text/xml').send(fs.readFileSync(p, 'utf8'));
-});
+/* ---------------- SOAP server ---------------- */
 
-/* ---------- SOAP ---------- */
 const wsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl');
 const wsdlXml = fs.readFileSync(wsdlPath, 'utf8');
 const serviceObject = qbwcServiceFactory();
@@ -61,33 +82,43 @@ const server = app.listen(PORT, () => {
   console.log(`[QBWC SOAP] Listening on ${baseUrl}`);
 });
 
-// 👇 IMPORTANTE: guarda el objeto devuelto por soap.listen
+// Helper: convierte payload (string/buffer/objeto) a string seguro antes de guardar
+function toXmlString(payload) {
+  if (payload == null) return '';
+  if (Buffer.isBuffer(payload)) return payload.toString('utf8');
+  if (typeof payload === 'string') return payload;
+  try { return JSON.stringify(payload, null, 2); } catch { return String(payload); }
+}
+
+// Importante: guardar el objeto retornado por soap.listen
 const soapServer = soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
 
-// (opcional) reduce ruido en logs
+// (Opcional) silenciar algo de ruido
 soapServer.log = (type, data) => {
   if (type === 'received' || type === 'replied') return;
   console.log(`[SOAP] ${type}`, (data && data.substring) ? data.substring(0, 120) + '…' : data);
 };
 
-// ⬇️ Guarda el authenticate REQUEST (node-soap emite 'request')
-soapServer.on('request', (xml, methodName) => {
+// Guardar authenticate REQUEST (node-soap emite 'request')
+soapServer.on('request', (payload, methodName) => {
   if (methodName === 'authenticate') {
     try {
-      fs.writeFileSync('/tmp/last-auth-request.xml', xml, 'utf8');
-      console.log('[SOAP] authenticate REQUEST length:', xml.length);
+      const xml = toXmlString(payload);
+      fs.writeFileSync('/home/LogFiles/last-auth-request.xml', xml, 'utf8');
+      console.log('[SOAP] authenticate REQUEST saved:', xml.length, 'bytes');
     } catch (e) {
       console.error('Failed to save last-auth-request:', e);
     }
   }
 });
 
-// ⬇️ Algunas versiones también emiten 'response' (no siempre)
-soapServer.on('response', (xml, methodName) => {
+// (Opcional) Guardar authenticate RESPONSE (si tu versión lo emite)
+soapServer.on('response', (payload, methodName) => {
   if (methodName === 'authenticate') {
     try {
-      fs.writeFileSync('/tmp/last-auth-response.xml', xml, 'utf8');
-      console.log('[SOAP] authenticate RESPONSE length:', xml.length);
+      const xml = toXmlString(payload);
+      fs.writeFileSync('/home/LogFiles/last-auth-response.xml', xml, 'utf8');
+      console.log('[SOAP] authenticate RESPONSE saved:', xml.length, 'bytes');
     } catch (e) {
       console.error('Failed to save last-auth-response:', e);
     }
