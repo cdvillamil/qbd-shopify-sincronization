@@ -5,29 +5,28 @@ const soap = require('soap');
 const morgan = require('morgan');
 const path = require('path');
 const fs = require('fs');
-const dotenv = require('dotenv');
-dotenv.config();
+require('dotenv').config();
 
 const { qbwcServiceFactory } = require('./services/qbwcService');
 
-const PORT = process.env.PORT || 3000;           // En Azure, PORT=8080
+const PORT = process.env.PORT || 3000;        // En Azure suele ser 8080
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 
-/* ---------- Log persistente de TODA request SOAP ---------- */
+/* ---------------- Log persistente de TODA request SOAP ---------------- */
 app.use(BASE_PATH, (req, res, next) => {
   try {
     fs.appendFileSync(
       '/home/LogFiles/qbwc.log',
       `${new Date().toISOString()} ${req.method} ${req.originalUrl}\n`
     );
-  } catch (_) {}
+  } catch {}
   next();
 });
 
-/* ---------- TAP de respuesta: guarda el SOBRE SOAP real ---------- */
+/* ---------------- TAP de respuesta (captura el body real) ------------- */
 app.use((req, res, next) => {
   if (!req.originalUrl.startsWith(BASE_PATH)) return next();
 
@@ -45,10 +44,16 @@ app.use((req, res, next) => {
       if (chunk) chunks.push(Buffer.from(chunk));
       const body = Buffer.concat(chunks).toString('utf8');
 
-      // Guarda el último authenticateResponse EXACTAMENTE como salió por la red
-      if (req.method === 'POST' && body.includes('<authenticateResponse')) {
-        fs.writeFileSync('/home/LogFiles/last-auth-response.xml', body, 'utf8');
-        console.log('[DEBUG] saved last-auth-response.xml:', body.length, 'bytes');
+      // Siempre guardamos el ÚLTIMO body POST crudo a /qbwc
+      if (req.method === 'POST') {
+        fs.writeFileSync('/home/LogFiles/last-post-body.xml', body || '', 'utf8');
+        console.log('[DEBUG] saved last-post-body.xml:', (body || '').length, 'bytes');
+
+        // Y si es authenticateResponse, además lo guardamos ahí
+        if (body.includes('<authenticateResponse')) {
+          fs.writeFileSync('/home/LogFiles/last-auth-response.xml', body, 'utf8');
+          console.log('[DEBUG] saved last-auth-response.xml:', body.length, 'bytes');
+        }
       }
     } catch (e) {
       console.error('[DEBUG] tap response error:', e);
@@ -69,8 +74,7 @@ function toXmlString(payload) {
 function sendFileSmart(res, filePath) {
   if (!fs.existsSync(filePath)) return res.status(404).send('not found');
   const txt = fs.readFileSync(filePath, 'utf8');
-  const looksXml = txt.trim().startsWith('<');
-  res.type(looksXml ? 'application/xml' : 'text/plain').send(txt);
+  res.type(txt.trim().startsWith('<') ? 'application/xml' : 'text/plain').send(txt);
 }
 
 /* ---------------- Health & Debug ---------------- */
@@ -84,21 +88,27 @@ app.get('/debug/config', (_req, res) => {
   });
 });
 
-// Último QBXML recibido desde QB (lo guarda receiveResponseXML en /tmp)
+// Último QBXML recibido de QB
 app.get('/debug/last-response', (req, res) => {
   try { sendFileSmart(res, '/tmp/qbwc-last-response.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
-// Último authenticate REQUEST (guardado en /home/LogFiles)
+// Último authenticate REQUEST (XML del cliente)
 app.get('/debug/last-auth-request', (req, res) => {
   try { sendFileSmart(res, '/home/LogFiles/last-auth-request.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
-// Último authenticate RESPONSE (sobre SOAP real capturado por el tap)
+// Último authenticate RESPONSE (sobre SOAP real)
 app.get('/debug/last-auth-response', (req, res) => {
   try { sendFileSmart(res, '/home/LogFiles/last-auth-response.xml'); }
+  catch (e) { res.status(500).send(String(e)); }
+});
+
+// Último body POST crudo a /qbwc (sea el método que sea)
+app.get('/debug/last-post-body', (req, res) => {
+  try { sendFileSmart(res, '/home/LogFiles/last-post-body.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
@@ -114,22 +124,17 @@ const server = app.listen(PORT, () => {
 // Instancia de SOAP
 const soapServer = soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
 
-/* ---- Hook del paquete "soap": aquí suele haber XML crudo ---- */
+/* ---- Hook del paquete "soap": capturamos el REQUEST de authenticate ---- */
 soapServer.log = (type, data) => {
   try {
     if (type === 'received') {
       const xml = toXmlString(data);
       if (xml.includes('<authenticate')) {
         fs.writeFileSync('/home/LogFiles/last-auth-request.xml', xml, 'utf8');
-        console.log('[SOAP] authenticate REQUEST saved via log hook:', xml.length, 'bytes');
+        console.log('[SOAP] authenticate REQUEST saved:', xml.length, 'bytes');
       }
-    } else if (type === 'replied') {
-      const xml = toXmlString(data);
-      if (xml.includes('<authenticate')) {
-        fs.writeFileSync('/home/LogFiles/last-auth-response.xml', xml, 'utf8');
-        console.log('[SOAP] authenticate RESPONSE saved via log hook:', xml.length, 'bytes');
-      }
-    } else {
+    } else if (type !== 'replied') {
+      // reduce ruido
       if (typeof data === 'string') {
         console.log(`[SOAP] ${type}`, data.substring(0, 120) + '…');
       } else {
@@ -138,29 +143,5 @@ soapServer.log = (type, data) => {
     }
   } catch (e) {
     console.error('[SOAP log hook] error:', e);
-  }
-};
-
-/* ---- Respaldo: algunos builds emiten 'request'/'response' como objeto ---- */
-soapServer.on('request', (payload, methodName) => {
-  if (methodName === 'authenticate') {
-    try {
-      const xml = toXmlString(payload);
-      fs.writeFileSync('/home/LogFiles/last-auth-request.xml', xml, 'utf8');
-      console.log('[SOAP] authenticate REQUEST saved via event:', xml.length, 'bytes');
-    } catch (e) {
-      console.error('Failed to save last-auth-request:', e);
-    }
-  }
-});
-soapServer.on('response', (payload, methodName) => {
-  if (methodName === 'authenticate') {
-    try {
-      const xml = toXmlString(payload);
-      fs.writeFileSync('/home/LogFiles/last-auth-response.xml', xml, 'utf8');
-      console.log('[SOAP] authenticate RESPONSE saved via event:', xml.length, 'bytes');
-    } catch (e) {
-      console.error('Failed to save last-auth-response:', e);
-    }
   }
 });
