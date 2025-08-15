@@ -18,19 +18,16 @@ function makeTicket() {
 
 exports.qbwcServiceFactory = function qbwcServiceFactory() {
   return {
-    // ⬇⬇⬇ IMPORTANTÍSIMO: estos nombres deben calzar con el WSDL
+    // ⚠️ Debe calzar con el WSDL (service/port)
     QBWebConnectorSvc: {
       QBWebConnectorSvcSoap: {
-        /* -------- Versionado -------- */
         serverVersion(_args, cb) {
-          // Devolver string vacío o un número. El WC acepta ambos.
-          cb(null, { serverVersionResult: '' });
+          cb(null, { serverVersionResult: '' }); // vacío aceptado
         },
         clientVersion({ strVersion }, cb) {
-          cb(null, { clientVersionResult: '' });
+          cb(null, { clientVersionResult: '' }); // vacío aceptado
         },
 
-        /* -------- Autenticación -------- */
         authenticate({ strUserName, strPassword }, cb) {
           logAuthAttempt(strUserName, strPassword);
 
@@ -39,33 +36,19 @@ exports.qbwcServiceFactory = function qbwcServiceFactory() {
           const ok = (strUserName === userEnv && strPassword === passEnv);
 
           if (!ok) {
-            // Caso credenciales inválidas: 2 strings => ["", "nvu"]
-            return cb(null, {
-              authenticateResult: { string: ['', 'nvu'] }
-              // Alternativa forzada:
-              // authenticateResult: { $xml: '<string></string><string>nvu</string>' }
-            });
+            // 2 strings => ["", "nvu"]
+            return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
           }
 
           const ticket = makeTicket();
 
-          // Caso OK: 2 strings => [ticket, "none"]
-          return cb(null, {
-            authenticateResult: { string: [ticket, 'none'] }
-            // Alternativa forzada (si aún falla):
-            // authenticateResult: {
-            //   $xml:
-            //     `<string xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
-            //     `       xmlns:xsd="http://www.w3.org/2001/XMLSchema" ` +
-            //     `       xsi:type="xsd:string">${ticket}</string>` +
-            //     `<string xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
-            //     `       xmlns:xsd="http://www.w3.org/2001/XMLSchema" ` +
-            //     `       xsi:type="xsd:string">none</string>`
-            // }
-          });
+          // 2 strings => [ticket, "none"]
+          return cb(null, { authenticateResult: { string: [ticket, 'none'] } });
+
+          // Si aún fallara, cambia por:
+          // return cb(null, { authenticateResult: { $xml: `<string>${ticket}</string><string>none</string>` } });
         },
 
-        /* -------- Qué pedir a QB -------- */
         sendRequestXML(_args, cb) {
           // QBXML mínimo de prueba
           const qbxml =
@@ -78,29 +61,17 @@ exports.qbwcServiceFactory = function qbwcServiceFactory() {
             '    </ItemQueryRq>' +
             '  </QBXMLMsgsRq>' +
             '</QBXML>';
-
           cb(null, { sendRequestXMLResult: qbxml });
         },
 
-        /* -------- Respuesta de QB -------- */
         receiveResponseXML({ response }, cb) {
-          try {
-            fs.writeFileSync('/tmp/qbwc-last-response.xml', response || '', 'utf8');
-          } catch (_) {}
-          // 0 => 100% completado
+          try { fs.writeFileSync('/tmp/qbwc-last-response.xml', response || '', 'utf8'); } catch {}
           cb(null, { receiveResponseXMLResult: 0 });
         },
 
-        /* -------- Errores / cierre -------- */
-        connectionError(_args, cb) {
-          cb(null, { connectionErrorResult: 'done' });
-        },
-        getLastError(_args, cb) {
-          cb(null, { getLastErrorResult: '' });
-        },
-        closeConnection(_args, cb) {
-          cb(null, { closeConnectionResult: 'OK' });
-        }
+        connectionError(_args, cb) { cb(null, { connectionErrorResult: 'done' }); },
+        getLastError(_args, cb) { cb(null, { getLastErrorResult: '' }); },
+        closeConnection(_args, cb) { cb(null, { closeConnectionResult: 'OK' }); }
       }
     }
   };
