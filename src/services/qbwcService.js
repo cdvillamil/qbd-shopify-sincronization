@@ -13,53 +13,56 @@ function logAuthAttempt(user, pass) {
 }
 
 function makeTicket() {
-  // ticket único por sesión
-  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+  return (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
 }
 
 exports.qbwcServiceFactory = function qbwcServiceFactory() {
   return {
     QBWebConnectorSvcSoap: {
       QBWebConnectorSvcSoap: {
-        // ----- Versionado -----
+        /* -------- Versionado -------- */
         serverVersion(_args, cb) {
-          cb(null, { serverVersionResult: '1.0.0-dev' });
+          // String vacío es aceptado por el WC (también puedes poner '1.0.0-dev')
+          cb(null, { serverVersionResult: '' });
         },
         clientVersion({ strVersion }, cb) {
-          // devolver string vacío ==> compatible con todas
+          // String vacío = compatible con cualquier WC
           cb(null, { clientVersionResult: '' });
         },
 
-        // ----- Autenticación -----
+        /* -------- Autenticación -------- */
         authenticate({ strUserName, strPassword }, cb) {
           logAuthAttempt(strUserName, strPassword);
 
           const userEnv = process.env.WC_USERNAME || '';
           const passEnv = process.env.WC_PASSWORD || '';
-
-          const ok = strUserName === userEnv && strPassword === passEnv;
+          const ok = (strUserName === userEnv && strPassword === passEnv);
 
           if (!ok) {
-            // Respuesta "usuario no válido": 2 strings
-            // 1) ticket vacío  2) 'nvu'
+            // EXACTO: 2 strings => ["", "nvu"]
             return cb(null, {
-              authenticateResult: { string: ['', 'nvu'] }
+              authenticateResult: {
+                $xml: '<string></string><string>nvu</string>'
+              }
             });
           }
 
           const ticket = makeTicket();
 
-          // Caso OK: 2 strings -> [ticket, 'none']
-          // ('none' es válido para continuar el flujo)
-          cb(null, {
-            authenticateResult: { string: [ticket, 'none'] }
+          // EXACTO: 2 strings => [ticket, "none"]
+          // Usamos $xml para evitar ambigüedades del serializer.
+          const resultXml =
+            `<string>${ticket}</string>` +
+            `<string>none</string>`;
+
+          return cb(null, {
+            authenticateResult: { $xml: resultXml }
           });
         },
 
-        // ----- Petición al QB (qué quieres que ejecute) -----
-        sendRequestXML(args, cb) {
-          // Para el stub, mandamos una consulta mínima (no importa lo que sea)
-          // QBWC solo quiere un QBXML bien formado.
+        /* -------- Qué pedir a QB -------- */
+        sendRequestXML(_args, cb) {
+          // QBXML mínimo de prueba: consulta 1 Item
           const qbxml =
             '<?xml version="1.0" encoding="utf-8"?>' +
             '<?qbxml version="13.0"?>' +
@@ -74,24 +77,23 @@ exports.qbwcServiceFactory = function qbwcServiceFactory() {
           cb(null, { sendRequestXMLResult: qbxml });
         },
 
-        // ----- Respuesta de QB -----
-        receiveResponseXML({ ticket, response, hresult, message }, cb) {
+        /* -------- Respuesta de QB -------- */
+        receiveResponseXML({ response }, cb) {
           try {
             fs.writeFileSync('/tmp/qbwc-last-response.xml', response || '', 'utf8');
           } catch (_) {}
-
-          // 0 ==> 100% completado. Puedes ajustar a 50, 75, etc.
+          // 0 => 100% completado
           cb(null, { receiveResponseXMLResult: 0 });
         },
 
-        // ----- Errores / cierre -----
-        connectionError({ ticket, hresult, message }, cb) {
+        /* -------- Errores / cierre -------- */
+        connectionError(_args, cb) {
           cb(null, { connectionErrorResult: 'done' });
         },
-        getLastError({ ticket }, cb) {
+        getLastError(_args, cb) {
           cb(null, { getLastErrorResult: '' });
         },
-        closeConnection({ ticket }, cb) {
+        closeConnection(_args, cb) {
           cb(null, { closeConnectionResult: 'OK' });
         }
       }
