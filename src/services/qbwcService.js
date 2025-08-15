@@ -18,15 +18,15 @@ function makeTicket() {
 
 exports.qbwcServiceFactory = function qbwcServiceFactory() {
   return {
-    QBWebConnectorSvcSoap: {
+    // ⬇⬇⬇ IMPORTANTÍSIMO: estos nombres deben calzar con el WSDL
+    QBWebConnectorSvc: {
       QBWebConnectorSvcSoap: {
         /* -------- Versionado -------- */
         serverVersion(_args, cb) {
-          // String vacío es aceptado por el WC (también puedes poner '1.0.0-dev')
+          // Devolver string vacío o un número. El WC acepta ambos.
           cb(null, { serverVersionResult: '' });
         },
         clientVersion({ strVersion }, cb) {
-          // String vacío = compatible con cualquier WC
           cb(null, { clientVersionResult: '' });
         },
 
@@ -39,30 +39,35 @@ exports.qbwcServiceFactory = function qbwcServiceFactory() {
           const ok = (strUserName === userEnv && strPassword === passEnv);
 
           if (!ok) {
-            // EXACTO: 2 strings => ["", "nvu"]
+            // Caso credenciales inválidas: 2 strings => ["", "nvu"]
             return cb(null, {
-              authenticateResult: {
-                $xml: '<string></string><string>nvu</string>'
-              }
+              authenticateResult: { string: ['', 'nvu'] }
+              // Alternativa forzada:
+              // authenticateResult: { $xml: '<string></string><string>nvu</string>' }
             });
           }
 
           const ticket = makeTicket();
 
-          // EXACTO: 2 strings => [ticket, "none"]
-          // Usamos $xml para evitar ambigüedades del serializer.
-          const resultXml =
-            `<string>${ticket}</string>` +
-            `<string>none</string>`;
-
+          // Caso OK: 2 strings => [ticket, "none"]
           return cb(null, {
-            authenticateResult: { $xml: resultXml }
+            authenticateResult: { string: [ticket, 'none'] }
+            // Alternativa forzada (si aún falla):
+            // authenticateResult: {
+            //   $xml:
+            //     `<string xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
+            //     `       xmlns:xsd="http://www.w3.org/2001/XMLSchema" ` +
+            //     `       xsi:type="xsd:string">${ticket}</string>` +
+            //     `<string xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
+            //     `       xmlns:xsd="http://www.w3.org/2001/XMLSchema" ` +
+            //     `       xsi:type="xsd:string">none</string>`
+            // }
           });
         },
 
         /* -------- Qué pedir a QB -------- */
         sendRequestXML(_args, cb) {
-          // QBXML mínimo de prueba: consulta 1 Item
+          // QBXML mínimo de prueba
           const qbxml =
             '<?xml version="1.0" encoding="utf-8"?>' +
             '<?qbxml version="13.0"?>' +
