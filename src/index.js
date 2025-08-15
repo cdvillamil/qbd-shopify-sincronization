@@ -9,7 +9,7 @@ require('dotenv').config();
 
 const { qbwcServiceFactory } = require('./services/qbwcService');
 
-const PORT = process.env.PORT || 3000;      // En Azure suele ser 8080
+const PORT = process.env.PORT || 8080;   // Azure usa 8080
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 
 const app = express();
@@ -81,32 +81,28 @@ app.get('/debug/config', (_req, res) => {
   });
 });
 
-// Último QBXML recibido de QB (lo guarda receiveResponseXML en /tmp)
 app.get('/debug/last-response', (req, res) => {
   try { sendFileSmart(res, '/tmp/qbwc-last-response.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
-// Último authenticate REQUEST (desde hook del paquete soap)
 app.get('/debug/last-auth-request', (req, res) => {
   try { sendFileSmart(res, '/home/LogFiles/last-auth-request.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
-// Último authenticate RESPONSE (sobre SOAP real del tap)
 app.get('/debug/last-auth-response', (req, res) => {
   try { sendFileSmart(res, '/home/LogFiles/last-auth-response.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
-// Último body POST crudo a /qbwc (sea el método que sea)
 app.get('/debug/last-post-body', (req, res) => {
   try { sendFileSmart(res, '/home/LogFiles/last-post-body.xml'); }
   catch (e) { res.status(500).send(String(e)); }
 });
 
 /* ---------- SOAP server ---------- */
-const wsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl'); // ojo a la ruta
+const wsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl');
 const wsdlXml = fs.readFileSync(wsdlPath, 'utf8');
 const serviceObject = qbwcServiceFactory();
 
@@ -136,3 +132,16 @@ soapServer.log = (type, data) => {
     console.error('[SOAP log hook] error:', e);
   }
 };
+
+// Captura lo que node-soap dice que respondió en authenticate
+soapServer.on('response', (payload, methodName) => {
+  try {
+    if (methodName === 'authenticate') {
+      const xml = safeToString(payload);
+      fs.writeFileSync('/home/LogFiles/last-auth-response.xml', xml || '', 'utf8');
+      console.log('[SOAP] saved last-auth-response via event:', (xml || '').length, 'bytes');
+    }
+  } catch (e) {
+    console.error('save last-auth-response failed:', e);
+  }
+});
