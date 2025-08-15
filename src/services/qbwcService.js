@@ -1,72 +1,100 @@
+// services/qbwcService.js
 'use strict';
-const { v4: uuidv4 } = require('uuid');
-const { buildMinimalInventoryQuery } = require('../qbxml/builders');
-const SESSIONS = new Map();
 
-function qbwcServiceFactory() {
+const fs = require('fs');
+const crypto = require('crypto');
+
+function logAuthAttempt(user, pass) {
+  const userEnv = process.env.WC_USERNAME || '';
+  const passEnv = process.env.WC_PASSWORD || '';
+  console.log(
+    `[QBWC] auth attempt user="${user}" matchUser=${user === userEnv} passLen=${(pass || '').length}`
+  );
+}
+
+function makeTicket() {
+  // ticket único por sesión
+  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+}
+
+exports.qbwcServiceFactory = function qbwcServiceFactory() {
   return {
-    QBWebConnectorSvc: {
+    QBWebConnectorSvcSoap: {
       QBWebConnectorSvcSoap: {
-        serverVersion(args, cb) { cb(null, { serverVersionResult: '1.0.0-dev' }); },
-        clientVersion(args, cb) { cb(null, { clientVersionResult: '' }); },
-        authenticate(args, cb) {
-          const user = args?.strUserName || '';
-          const pass = args?.strPassword || '';
+        // ----- Versionado -----
+        serverVersion(_args, cb) {
+          cb(null, { serverVersionResult: '1.0.0-dev' });
+        },
+        clientVersion({ strVersion }, cb) {
+          // devolver string vacío ==> compatible con todas
+          cb(null, { clientVersionResult: '' });
+        },
 
-          const EXPECTED_USER = process.env.WC_USERNAME;
-          const EXPECTED_PASS = process.env.WC_PASSWORD;
-          const PERMISSIVE    = process.env.AUTH_PERMISSIVE === '1';
+        // ----- Autenticación -----
+        authenticate({ strUserName, strPassword }, cb) {
+          logAuthAttempt(strUserName, strPassword);
 
-          console.log(`[QBWC] auth attempt user="${user}" matchUser=${user===EXPECTED_USER} passLen=${(pass||'').length}`);
+          const userEnv = process.env.WC_USERNAME || '';
+          const passEnv = process.env.WC_PASSWORD || '';
 
-          const ok = PERMISSIVE || (user === EXPECTED_USER && pass === EXPECTED_PASS);
-          const { v4: uuidv4 } = require('uuid');
+          const ok = strUserName === userEnv && strPassword === passEnv;
 
           if (!ok) {
-            // con ArrayOfString en el WSDL, el array se devuelve como { string: [...] }
-            return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
+            // Respuesta "usuario no válido": 2 strings
+            // 1) ticket vacío  2) 'nvu'
+            return cb(null, {
+              authenticateResult: { string: ['', 'nvu'] }
+            });
           }
 
-          const ticket = uuidv4();
-          // 2º string NO vacío para evitar el bug del WC con cadenas vacías
-          return cb(null, { authenticateResult: { string: [ticket, 'none'] } });
+          const ticket = makeTicket();
+
+          // Caso OK: 2 strings -> [ticket, 'none']
+          // ('none' es válido para continuar el flujo)
+          cb(null, {
+            authenticateResult: { string: [ticket, 'none'] }
+          });
         },
+
+        // ----- Petición al QB (qué quieres que ejecute) -----
         sendRequestXML(args, cb) {
-          const ticket = args && args.ticket;
-          const sess = SESSIONS.get(ticket);
-          if (!sess) return cb(null, { sendRequestXMLResult: '' });
-          if (sess.step === 0) {
-            const qbxml = buildMinimalInventoryQuery(1);
-            sess.step = 1;
-            return cb(null, { sendRequestXMLResult: qbxml });
-          }
-          return cb(null, { sendRequestXMLResult: '' });
+          // Para el stub, mandamos una consulta mínima (no importa lo que sea)
+          // QBWC solo quiere un QBXML bien formado.
+          const qbxml =
+            '<?xml version="1.0" encoding="utf-8"?>' +
+            '<?qbxml version="13.0"?>' +
+            '<QBXML>' +
+            '  <QBXMLMsgsRq onError="stopOnError">' +
+            '    <ItemQueryRq requestID="1">' +
+            '      <MaxReturned>1</MaxReturned>' +
+            '    </ItemQueryRq>' +
+            '  </QBXMLMsgsRq>' +
+            '</QBXML>';
+
+          cb(null, { sendRequestXMLResult: qbxml });
         },
-        receiveResponseXML(args, cb) {
-          const ticket = args && args.ticket;
-          const sess = SESSIONS.get(ticket);
-          if (sess) { sess.step = 999; sess.lastError = ''; }
-          cb(null, { receiveResponseXMLResult: 100 });
+
+        // ----- Respuesta de QB -----
+        receiveResponseXML({ ticket, response, hresult, message }, cb) {
+          try {
+            fs.writeFileSync('/tmp/qbwc-last-response.xml', response || '', 'utf8');
+          } catch (_) {}
+
+          // 0 ==> 100% completado. Puedes ajustar a 50, 75, etc.
+          cb(null, { receiveResponseXMLResult: 0 });
         },
-        getLastError(args, cb) {
-          const ticket = args && args.ticket;
-          const sess = SESSIONS.get(ticket);
-          const msg = (sess && sess.lastError) || '';
-          cb(null, { getLastErrorResult: msg });
-        },
-        connectionError(args, cb) {
-          const ticket = args && args.ticket;
-          const sess = SESSIONS.get(ticket);
-          if (sess) sess.lastError = `ConnectionError hresult=${args.hresult || ''} message=${args.message || ''}`;
+
+        // ----- Errores / cierre -----
+        connectionError({ ticket, hresult, message }, cb) {
           cb(null, { connectionErrorResult: 'done' });
         },
-        closeConnection(args, cb) {
-          const ticket = args && args.ticket;
-          SESSIONS.delete(ticket);
+        getLastError({ ticket }, cb) {
+          cb(null, { getLastErrorResult: '' });
+        },
+        closeConnection({ ticket }, cb) {
           cb(null, { closeConnectionResult: 'OK' });
         }
       }
     }
   };
-}
-module.exports = { qbwcServiceFactory };
+};
