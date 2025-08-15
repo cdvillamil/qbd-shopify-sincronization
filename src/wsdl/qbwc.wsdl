@@ -1,116 +1,258 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<definitions name="QBWebConnectorSvc"
-  targetNamespace="http://developer.intuit.com/"
-  xmlns:tns="http://developer.intuit.com/"
+<?xml version="1.0" encoding="utf-8"?>
+<wsdl:definitions
+  xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
   xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-  xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+  xmlns:tns="http://developer.intuit.com/"
+  targetNamespace="http://developer.intuit.com/">
 
-  <types>
+  <wsdl:types>
     <xsd:schema targetNamespace="http://developer.intuit.com/">
       <xsd:complexType name="ArrayOfString">
         <xsd:sequence>
           <xsd:element name="string" type="xsd:string" minOccurs="0" maxOccurs="unbounded"/>
         </xsd:sequence>
       </xsd:complexType>
+
+      <xsd:element name="serverVersion">
+        <xsd:complexType><xsd:sequence/></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="serverVersionResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="serverVersionResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="clientVersion">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="strVersion" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="clientVersionResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="clientVersionResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="authenticate">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="strUserName" type="xsd:string"/>
+          <xsd:element name="strPassword" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="authenticateResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="authenticateResult" type="tns:ArrayOfString"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="sendRequestXML">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="ticket" type="xsd:string"/>
+          <xsd:element name="strHCPResponse" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="strCompanyFileName" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="qbXMLCountry" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="qbXMLMajorVers" type="xsd:int"/>
+          <xsd:element name="qbXMLMinorVers" type="xsd:int"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="sendRequestXMLResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="sendRequestXMLResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="receiveResponseXML">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="ticket" type="xsd:string"/>
+          <xsd:element name="response" type="xsd:string"/>
+          <xsd:element name="hresult" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="message" type="xsd:string" minOccurs="0"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="receiveResponseXMLResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="receiveResponseXMLResult" type="xsd:int"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="connectionError">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="ticket" type="xsd:string"/>
+          <xsd:element name="hresult" type="xsd:string"/>
+          <xsd:element name="message" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="connectionErrorResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="connectionErrorResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="getLastError">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="ticket" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="getLastErrorResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="getLastErrorResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="closeConnection">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="ticket" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+      <xsd:element name="closeConnectionResponse">
+        <xsd:complexType><xsd:sequence>
+          <xsd:element name="closeConnectionResult" type="xsd:string"/>
+        </xsd:sequence></xsd:complexType>
+      </xsd:element>
+
     </xsd:schema>
-  </types>
+  </wsdl:types>
 
-  <message name="serverVersionRequest"/>
-  <message name="serverVersionResponse"><part name="serverVersionResult" type="xsd:string"/></message>
+  <wsdl:message name="serverVersionRequest">
+    <wsdl:part name="parameters" element="tns:serverVersion"/>
+  </wsdl:message>
+  <wsdl:message name="serverVersionResponse">
+    <wsdl:part name="parameters" element="tns:serverVersionResponse"/>
+  </wsdl:message>
 
-  <message name="clientVersionRequest"><part name="strVersion" type="xsd:string"/></message>
-  <message name="clientVersionResponse"><part name="clientVersionResult" type="xsd:string"/></message>
+  <wsdl:message name="clientVersionRequest">
+    <wsdl:part name="parameters" element="tns:clientVersion"/>
+  </wsdl:message>
+  <wsdl:message name="clientVersionResponse">
+    <wsdl:part name="parameters" element="tns:clientVersionResponse"/>
+  </wsdl:message>
 
-  <message name="authenticateRequest">
-    <part name="strUserName" type="xsd:string"/>
-    <part name="strPassword" type="xsd:string"/>
-  </message>
-  <message name="authenticateResponse">
-    <part name="authenticateResult" type="tns:ArrayOfString"/>
-  </message>
+  <wsdl:message name="authenticateRequest">
+    <wsdl:part name="parameters" element="tns:authenticate"/>
+  </wsdl:message>
+  <wsdl:message name="authenticateResponse">
+    <wsdl:part name="parameters" element="tns:authenticateResponse"/>
+  </wsdl:message>
 
-  <message name="sendRequestXMLRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="strHCPResponse" type="xsd:string"/>
-    <part name="strCompanyFileName" type="xsd:string"/>
-    <part name="qbXMLCountry" type="xsd:string"/>
-    <part name="qbXMLMajorVers" type="xsd:int"/>
-    <part name="qbXMLMinorVers" type="xsd:int"/>
-  </message>
-  <message name="sendRequestXMLResponse"><part name="sendRequestXMLResult" type="xsd:string"/></message>
+  <wsdl:message name="sendRequestXMLRequest">
+    <wsdl:part name="parameters" element="tns:sendRequestXML"/>
+  </wsdl:message>
+  <wsdl:message name="sendRequestXMLResponse">
+    <wsdl:part name="parameters" element="tns:sendRequestXMLResponse"/>
+  </wsdl:message>
 
-  <message name="receiveResponseXMLRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="response" type="xsd:string"/>
-    <part name="hresult" type="xsd:string"/>
-    <part name="message" type="xsd:string"/>
-  </message>
-  <message name="receiveResponseXMLResponse"><part name="receiveResponseXMLResult" type="xsd:int"/></message>
+  <wsdl:message name="receiveResponseXMLRequest">
+    <wsdl:part name="parameters" element="tns:receiveResponseXML"/>
+  </wsdl:message>
+  <wsdl:message name="receiveResponseXMLResponse">
+    <wsdl:part name="parameters" element="tns:receiveResponseXMLResponse"/>
+  </wsdl:message>
 
-  <message name="getLastErrorRequest"><part name="ticket" type="xsd:string"/></message>
-  <message name="getLastErrorResponse"><part name="getLastErrorResult" type="xsd:string"/></message>
+  <wsdl:message name="connectionErrorRequest">
+    <wsdl:part name="parameters" element="tns:connectionError"/>
+  </wsdl:message>
+  <wsdl:message name="connectionErrorResponse">
+    <wsdl:part name="parameters" element="tns:connectionErrorResponse"/>
+  </wsdl:message>
 
-  <message name="connectionErrorRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="hresult" type="xsd:string"/>
-    <part name="message" type="xsd:string"/>
-  </message>
-  <message name="connectionErrorResponse"><part name="connectionErrorResult" type="xsd:string"/></message>
+  <wsdl:message name="getLastErrorRequest">
+    <wsdl:part name="parameters" element="tns:getLastError"/>
+  </wsdl:message>
+  <wsdl:message name="getLastErrorResponse">
+    <wsdl:part name="parameters" element="tns:getLastErrorResponse"/>
+  </wsdl:message>
 
-  <message name="closeConnectionRequest"><part name="ticket" type="xsd:string"/></message>
-  <message name="closeConnectionResponse"><part name="closeConnectionResult" type="xsd:string"/></message>
+  <wsdl:message name="closeConnectionRequest">
+    <wsdl:part name="parameters" element="tns:closeConnection"/>
+  </wsdl:message>
+  <wsdl:message name="closeConnectionResponse">
+    <wsdl:part name="parameters" element="tns:closeConnectionResponse"/>
+  </wsdl:message>
 
-  <portType name="QBWebConnectorSvcPortType">
-    <operation name="serverVersion"><input message="tns:serverVersionRequest"/><output message="tns:serverVersionResponse"/></operation>
-    <operation name="clientVersion"><input message="tns:clientVersionRequest"/><output message="tns:clientVersionResponse"/></operation>
-    <operation name="authenticate"><input message="tns:authenticateRequest"/><output message="tns:authenticateResponse"/></operation>
-    <operation name="sendRequestXML"><input message="tns:sendRequestXMLRequest"/><output message="tns:sendRequestXMLResponse"/></operation>
-    <operation name="receiveResponseXML"><input message="tns:receiveResponseXMLRequest"/><output message="tns:receiveResponseXMLResponse"/></operation>
-    <operation name="getLastError"><input message="tns:getLastErrorRequest"/><output message="tns:getLastErrorResponse"/></operation>
-    <operation name="connectionError"><input message="tns:connectionErrorRequest"/><output message="tns:connectionErrorResponse"/></operation>
-    <operation name="closeConnection"><input message="tns:closeConnectionRequest"/><output message="tns:closeConnectionResponse"/></operation>
-  </portType>
+  <wsdl:portType name="QBWebConnectorSvcSoap">
+    <wsdl:operation name="serverVersion">
+      <wsdl:input  message="tns:serverVersionRequest"/>
+      <wsdl:output message="tns:serverVersionResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="clientVersion">
+      <wsdl:input  message="tns:clientVersionRequest"/>
+      <wsdl:output message="tns:clientVersionResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="authenticate">
+      <wsdl:input  message="tns:authenticateRequest"/>
+      <wsdl:output message="tns:authenticateResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="sendRequestXML">
+      <wsdl:input  message="tns:sendRequestXMLRequest"/>
+      <wsdl:output message="tns:sendRequestXMLResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="receiveResponseXML">
+      <wsdl:input  message="tns:receiveResponseXMLRequest"/>
+      <wsdl:output message="tns:receiveResponseXMLResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="connectionError">
+      <wsdl:input  message="tns:connectionErrorRequest"/>
+      <wsdl:output message="tns:connectionErrorResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="getLastError">
+      <wsdl:input  message="tns:getLastErrorRequest"/>
+      <wsdl:output message="tns:getLastErrorResponse"/>
+    </wsdl:operation>
+    <wsdl:operation name="closeConnection">
+      <wsdl:input  message="tns:closeConnectionRequest"/>
+      <wsdl:output message="tns:closeConnectionResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
 
-  <binding name="QBWebConnectorSvcSoapBinding" type="tns:QBWebConnectorSvcPortType">
-    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
-    <operation name="serverVersion"><soap:operation soapAction="http://developer.intuit.com/serverVersion"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="clientVersion"><soap:operation soapAction="http://developer.intuit.com/clientVersion"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="authenticate"><soap:operation soapAction="http://developer.intuit.com/authenticate"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="sendRequestXML"><soap:operation soapAction="http://developer.intuit.com/sendRequestXML"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="receiveResponseXML"><soap:operation soapAction="http://developer.intuit.com/receiveResponseXML"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="getLastError"><soap:operation soapAction="http://developer.intuit.com/getLastError"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="connectionError"><soap:operation soapAction="http://developer.intuit.com/connectionError"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="closeConnection"><soap:operation soapAction="http://developer.intuit.com/closeConnection"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-  </binding>
+  <wsdl:binding name="QBWebConnectorSvcSoap" type="tns:QBWebConnectorSvcSoap">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="serverVersion">
+      <soap:operation soapAction="http://developer.intuit.com/serverVersion" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="clientVersion">
+      <soap:operation soapAction="http://developer.intuit.com/clientVersion" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="authenticate">
+      <soap:operation soapAction="http://developer.intuit.com/authenticate" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="sendRequestXML">
+      <soap:operation soapAction="http://developer.intuit.com/sendRequestXML" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="receiveResponseXML">
+      <soap:operation soapAction="http://developer.intuit.com/receiveResponseXML" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="connectionError">
+      <soap:operation soapAction="http://developer.intuit.com/connectionError" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="getLastError">
+      <soap:operation soapAction="http://developer.intuit.com/getLastError" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+    <wsdl:operation name="closeConnection">
+      <soap:operation soapAction="http://developer.intuit.com/closeConnection" />
+      <wsdl:input><soap:body use="literal"/></wsdl:input>
+      <wsdl:output><soap:body use="literal"/></wsdl:output>
+    </wsdl:operation>
+  </wsdl:binding>
 
-  <service name="QBWebConnectorSvc">
-    <port name="QBWebConnectorSvcSoap" binding="tns:QBWebConnectorSvcSoapBinding">
-      <soap:address location="http://localhost:3000/qbwc"/>
-    </port>
-  </service>
-</definitions>
+  <wsdl:service name="QBWebConnectorSvc">
+    <wsdl:port name="QBWebConnectorSvcSoap" binding="tns:QBWebConnectorSvcSoap">
+      <soap:address location="https://example.com/qbwc"/>
+    </wsdl:port>
+  </wsdl:service>
+
+</wsdl:definitions>
