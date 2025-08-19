@@ -10,54 +10,72 @@ require('dotenv').config();
 
 const { qbwcServiceFactory } = require('./services/qbwcService');
 
-const PORT = process.env.PORT || 8080;                 // Azure Linux suele usar 8080
+/* ====== Config ====== */
+const PORT = process.env.PORT || 8080;                 // Azure Linux usa 8080
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const TNS = 'http://developer.intuit.com/';
+const LOG_DIR = process.env.LOG_DIR || '/tmp';         // <— usamos /tmp para asegurar escritura
 
-const app = express();
-app.use(morgan(process.env.LOG_LEVEL || 'dev'));
-
-/* ---------------- Utilidades ---------------- */
+/* ====== Helpers de archivos ====== */
+function ensureLogDir() {
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+}
+function fp(name) { return path.join(LOG_DIR, name); }
 function sendFileSmart(res, filePath) {
   if (!fs.existsSync(filePath)) return res.status(404).send('not found');
   const txt = fs.readFileSync(filePath, 'utf8');
   res.type(txt.trim().startsWith('<') ? 'application/xml' : 'text/plain').send(txt);
 }
+ensureLogDir();
 
-/* ---------------- Health & Debug ---------------- */
+/* ====== App ====== */
+const app = express();
+app.use(morgan(process.env.LOG_LEVEL || 'dev'));
+
+/* ====== Debug/health ====== */
 app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
 
 app.get('/debug/config', (_req, res) => {
   res.json({
     user: process.env.WC_USERNAME || null,
     passLen: (process.env.WC_PASSWORD || '').length,
-    basePath: BASE_PATH
+    basePath: BASE_PATH,
+    logDir: LOG_DIR
   });
 });
 
+app.get('/debug/where', (_req, res) => {
+  try {
+    ensureLogDir();
+    const list = fs.readdirSync(LOG_DIR).map(f => {
+      const st = fs.statSync(path.join(LOG_DIR, f));
+      return { name: f, size: st.size, mtime: st.mtime };
+    });
+    res.json({ logDir: LOG_DIR, files: list });
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
+});
+
 app.get('/debug/last-response', (req, res) => {
-  try { sendFileSmart(res, '/tmp/qbwc-last-response.xml'); }
+  try { sendFileSmart(res, fp('qbwc-last-response.xml')); }
   catch (e) { res.status(500).send(String(e)); }
 });
-
 app.get('/debug/last-auth-request', (req, res) => {
-  try { sendFileSmart(res, '/home/LogFiles/last-auth-request.xml'); }
+  try { sendFileSmart(res, fp('last-auth-request.xml')); }
   catch (e) { res.status(500).send(String(e)); }
 });
-
 app.get('/debug/last-auth-response', (req, res) => {
-  try { sendFileSmart(res, '/home/LogFiles/last-auth-response.xml'); }
+  try { sendFileSmart(res, fp('last-auth-response.xml')); }
   catch (e) { res.status(500).send(String(e)); }
 });
-
 app.get('/debug/last-post-body', (req, res) => {
-  try { sendFileSmart(res, '/home/LogFiles/last-post-body.xml'); }
+  try { sendFileSmart(res, fp('last-post-body.xml')); }
   catch (e) { res.status(500).send(String(e)); }
 });
-
 app.get('/debug/last-auth-cred', (req, res) => {
   try {
-    const p = '/home/LogFiles/last-auth-cred.json';
+    const p = fp('last-auth-cred.json');
     if (!fs.existsSync(p)) return res.status(404).send('no auth cred yet');
     res.type('application/json').send(fs.readFileSync(p, 'utf8'));
   } catch (e) {
@@ -65,15 +83,7 @@ app.get('/debug/last-auth-cred', (req, res) => {
   }
 });
 
-/* ------------------------------------------------------------------
-   OVERRIDE de authenticate
-   - Detecta por SOAPAction y/o por contenido
-   - Responde con un sobre SOAP “canónico”
-   - Registra request/response y hashes de contraseña
-   Nota: este handler lee el body. Mientras estemos depurando
-   authenticate, es suficiente. Cuando pase authenticate, podremos
-   refinar para no consumir el stream en otros métodos.
-------------------------------------------------------------------- */
+/* ====== OVERRIDE authenticate (agnóstico a SOAPAction) ====== */
 app.post(BASE_PATH, (req, res, next) => {
   const wantsAuthByHeader =
     (req.headers['soapaction'] || '').toLowerCase().includes('authenticate');
@@ -82,23 +92,19 @@ app.post(BASE_PATH, (req, res, next) => {
   req.setEncoding('utf8');
   req.on('data', chunk => { raw += chunk; });
   req.on('end', () => {
+    ensureLogDir();
+    try { fs.writeFileSync(fp('last-post-body.xml'), raw || '', 'utf8'); } catch {}
+
     const wantsAuthByBody = raw.includes('<authenticate') || raw.includes(':authenticate');
-
-    // Guarda SIEMPRE lo que llegó en este POST (útil para depurar)
-    try { fs.writeFileSync('/home/LogFiles/last-post-body.xml', raw || '', 'utf8'); } catch {}
-
     if (!wantsAuthByHeader && !wantsAuthByBody) {
-      // No es authenticate -> (por ahora) dejamos que node-soap lo maneje
-      // OJO: como ya consumimos el stream, este camino es sólo para la
-      // depuración de authenticate. El resto del flujo lo ajustaremos después.
+      // En esta fase de depuración, respondemos 200 para no romper nada.
       return res.status(200).send('OK');
     }
 
     try {
-      // Guarda el REQUEST de authenticate
-      try { fs.writeFileSync('/home/LogFiles/last-auth-request.xml', raw || '', 'utf8'); } catch {}
+      try { fs.writeFileSync(fp('last-auth-request.xml'), raw || '', 'utf8'); } catch {}
 
-      // Extrae user/pass (regex compatible con prefijos)
+      // Extrae user/pass (regex simple, tolerante a prefijos)
       const user = (raw.match(/<\w*:strUserName>([^<]*)<\/\w*:strUserName>/) || [])[1] || '';
       const pass = (raw.match(/<\w*:strPassword>([^<]*)<\/\w*:strPassword>/) || [])[1] || '';
 
@@ -107,7 +113,7 @@ app.post(BASE_PATH, (req, res, next) => {
 
       console.log(`[QBWC] auth attempt user="${user}" matchUser=${user === envUser} passLen=${pass.length}`);
 
-      // Guarda hashes/longitudes para validar sin exponer la clave
+      // Guarda hashes/longitudes para validar sin filtrar la clave
       try {
         const passSha = crypto.createHash('sha256').update(pass, 'utf8').digest('hex');
         const envSha  = crypto.createHash('sha256').update(envPass, 'utf8').digest('hex');
@@ -122,7 +128,7 @@ app.post(BASE_PATH, (req, res, next) => {
           matchUser: user === envUser,
           matchPassHash: passSha === envSha
         };
-        fs.writeFileSync('/home/LogFiles/last-auth-cred.json', JSON.stringify(debugObj, null, 2), 'utf8');
+        fs.writeFileSync(fp('last-auth-cred.json'), JSON.stringify(debugObj, null, 2), 'utf8');
       } catch (e) {
         console.error('failed to save last-auth-cred:', e);
       }
@@ -136,7 +142,7 @@ app.post(BASE_PATH, (req, res, next) => {
         ? `<string>${ticket}</string><string>none</string>`
         : `<string></string><string>nvu</string>`;
 
-      // Sobre SOAP canónico: xmlns por defecto en authenticateResponse
+      // Sobre SOAP canónico (xmlns por defecto en authenticateResponse)
       const envelope =
         `<?xml version="1.0" encoding="utf-8"?>` +
         `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">` +
@@ -151,16 +157,15 @@ app.post(BASE_PATH, (req, res, next) => {
       res.setHeader('SOAPAction', `${TNS}authenticate`);
       res.status(200).send(envelope);
 
-      try { fs.writeFileSync('/home/LogFiles/last-auth-response.xml', envelope, 'utf8'); } catch {}
+      try { fs.writeFileSync(fp('last-auth-response.xml'), envelope, 'utf8'); } catch {}
     } catch (err) {
       console.error('authenticate override error:', err);
-      // si algo falla, regresamos 500 para verlo rápido en el WC
       res.status(500).send(String(err));
     }
   });
 });
 
-/* ---------------- SOAP server (resto de operaciones) ---------------- */
+/* ====== SOAP server (resto de operaciones) ====== */
 const wsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl');
 const wsdlXml = fs.readFileSync(wsdlPath, 'utf8');
 const serviceObject = qbwcServiceFactory();
@@ -169,10 +174,10 @@ const server = app.listen(PORT, () => {
   console.log(`[QBWC SOAP] Listening on http://localhost:${PORT}${BASE_PATH}`);
 });
 
-// IMPORTANTE: Montar node-soap DESPUÉS del override
+// Montamos node-soap DESPUÉS del override
 const soapServer = soap.listen(server, BASE_PATH, serviceObject, wsdlXml);
 
-// Log de respaldo por si queremos ver lo que recibe node-soap
+// Log de respaldo (si llega por node-soap)
 function safeToString(payload) {
   if (payload == null) return '';
   if (Buffer.isBuffer(payload)) return payload.toString('utf8');
@@ -184,7 +189,7 @@ soapServer.log = (type, data) => {
     if (type === 'received') {
       const xml = safeToString(data);
       if (xml.includes('<authenticate')) {
-        fs.writeFileSync('/home/LogFiles/last-auth-request.xml', xml, 'utf8');
+        fs.writeFileSync(fp('last-auth-request.xml'), xml, 'utf8');
       }
     }
   } catch (e) {
