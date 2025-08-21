@@ -57,4 +57,9 @@ jobs:
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
-        uses: a
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'qbd-shopify-sincronization'
+          slot-name: 'Production'
+          package: .
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_2843508CC9464323A9739F838B4200BF }}
