@@ -5,6 +5,7 @@ const morgan  = require('morgan');
 const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
+const { buildInventoryQueryXML } = require('./services/inventory');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -51,20 +52,19 @@ function peekJob(){ const L = readJobs(); return L[0] || null; }
 function popJob(){ const L = readJobs(); const j = L.shift(); writeJobs(L); return j||null; }
 
 /* Generar QBXML según el job */
-function qbxmlFor(job){
-  if (job.type === 'inventoryQuery'){
-    const max = Number(job.max)||10;
-    return `<?xml version="1.0"?><?qbxml version="16.0"?>
-<QBXML>
-  <QBXMLMsgsRq onError="stopOnError">
-    <ItemInventoryQueryRq requestID="1">
-      <MaxReturned>${max}</MaxReturned>
-    </ItemInventoryQueryRq>
-  </QBXMLMsgsRq>
-</QBXML>`;
+function qbxmlFor(job) {
+  if (!job || !job.type) return '';
+
+  if (job.type === 'inventoryQuery') {
+    // Usamos el builder del servicio (desacople suave)
+    const max = Number(job.max) || Number(process.env.INVENTORY_MAX || 50);
+    return buildInventoryQueryXML(max, process.env.QBXML_VER || '13.0');
   }
+
+  // Mantén aquí tus otros tipos de job si los tienes
   return '';
 }
+
 
 /* Parseo simple del ItemInventoryRet (sin libs) */
 function parseInventory(qbxml){
@@ -109,6 +109,7 @@ app.get('/debug/last-auth-cred', (req,res)=>{
   const p=fp('last-auth-cred.json'); if(!fs.existsSync(p)) return res.status(404).send('no auth cred yet');
   res.type('application/json').send(fs.readFileSync(p,'utf8'));
 });
+app.get('/debug/last-response', (req, res) => sendFileSmart(res, fp('last-response.xml')));
 
 /* Nueva cola: ver y sembrar */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
@@ -155,6 +156,12 @@ app.post(BASE_PATH, (req,res)=>{
         const envUser = process.env.WC_USERNAME || '';
         const envPass = process.env.WC_PASSWORD || '';
         const ok = (user===envUser && pass===envPass);
+
+        // justo después de calcular ok=true en authenticate:
+        if (ok && process.env.AUTO_SEED_ON_AUTH === 'true') {
+          enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 50), ts: new Date().toISOString() });
+        }
+
 
         const passSha = crypto.createHash('sha256').update(pass||'', 'utf8').digest('hex');
         const envSha  = crypto.createHash('sha256').update(envPass, 'utf8').digest('hex');
