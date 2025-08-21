@@ -325,45 +325,47 @@ const soapService = {
   QBWebConnectorSvc: {
     QBWebConnectorSvcSoap: {
       serverVersion(_args, cb) {
-        // Coincide con lo que tu WC mostró en el log
         return cb(null, { serverVersionResult: '1.0.0-dev' });
       },
       clientVersion(_args, cb) {
-        // Cadena vacía = permitir
         return cb(null, { clientVersionResult: '' });
       },
+
+      // ✅ FIX: authenticate debe devolver SIEMPRE 2 strings o ['', 'nvu']
       authenticate(args, cb) {
         try {
           const user = args?.strUserName || '';
           const pass = args?.strPassword || '';
 
-          // Si defines QBWC_USERNAME/QBWC_PASSWORD, se validan; de lo contrario, aceptar.
           const confUser = process.env.QBWC_USERNAME;
           const confPass = process.env.QBWC_PASSWORD;
           const acceptAny = !confUser && !confPass;
           const ok = acceptAny || (user === confUser && pass === confPass);
 
-          if (!ok) return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
-
-          const ticket = randomUUID();
-          // Devuelve el company file si definiste COMPANY_FILE; si no, usa el abierto
-          const cfn = COMPANY_FILE;
-
-          // Auto-sembrar inventario al autenticarse (opcional via env)
-          if (process.env.AUTO_SEED_ON_AUTH === 'true') {
-            enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 50), ts: new Date().toISOString() });
+          if (!ok) {
+            // En fallo SIEMPRE 2 elementos: ['', 'nvu']
+            return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
           }
 
-          // Algunos WSDL aceptan array de 2 o de 4 strings; devolvemos 4 por compatibilidad
-          return cb(null, { authenticateResult: { string: [ticket, cfn, '', ''] } });
+          const ticket = (typeof crypto !== 'undefined' && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+          // Segundo elemento NUNCA null/undefined. Usa '' para “archivo abierto actual”
+          // Si quieres fijar el archivo explícito pon en Azure:
+          // COMPANY_FILE=C:\Users\administrador\Documents\BACKUPS\live wire  company file.qbw
+          const cfn = process.env.COMPANY_FILE || '';
+
+          // ✅ IMPORTANTE: Devuelve EXACTAMENTE dos strings
+          return cb(null, { authenticateResult: { string: [ticket, cfn] } });
         } catch (err) {
-          lastErrorMessage = `authenticate error: ${String(err)}`;
+          // En excepción, devuelve forma válida para evitar "Index out of range"
           return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
         }
       },
+
       sendRequestXML(args, cb) {
         try {
-          // Si no hay job, no hay trabajo -> devuelve vacío para cerrar sesión
           const job = peekJob();
           if (!job) return cb(null, { sendRequestXMLResult: '' });
 
@@ -371,18 +373,15 @@ const soapService = {
           fs.writeFileSync(fp('last-request-qbxml.xml'), xml, 'utf8');
           return cb(null, { sendRequestXMLResult: xml });
         } catch (err) {
-          lastErrorMessage = `sendRequestXML error: ${String(err)}`;
           return cb(null, { sendRequestXMLResult: '' });
         }
       },
+
       receiveResponseXML(args, cb) {
         try {
           const response = args?.response || args?.responseXML || '';
-
-          // Guardar el XML crudo
           fs.writeFileSync(fp('last-response.xml'), response, 'utf8');
 
-          // ---- HOOK: parsear y persistir inventario si aplica ----
           try {
             if (response && response.includes('<ItemInventoryQueryRs')) {
               parseAndPersistInventory(response);
@@ -390,35 +389,34 @@ const soapService = {
           } catch (e) {
             console.error('Inventory parse error:', e);
           }
-          // --------------------------------------------------------
 
-          // Marcamos el job como completado (flujo simple: 1 request = 1 job)
           const current = peekJob();
           if (current) shiftJob();
 
-          // 100 = no hay más por procesar de este request
           return cb(null, { receiveResponseXMLResult: 100 });
         } catch (err) {
-          lastErrorMessage = `receiveResponseXML error: ${String(err)}`;
-          // Devuelve 100 para no ciclar
           return cb(null, { receiveResponseXMLResult: 100 });
         }
       },
+
       connectionError(args, cb) {
         const hresult = args?.hresult || '';
         const message = args?.message || '';
-        lastErrorMessage = `connectionError: hresult=${hresult} message=${message}`;
+        const lastErrorMessage = `connectionError: hresult=${hresult} message=${message}`;
         return cb(null, { connectionErrorResult: lastErrorMessage });
       },
+
       getLastError(_args, cb) {
-        return cb(null, { getLastErrorResult: lastErrorMessage || '' });
+        return cb(null, { getLastErrorResult: '' });
       },
+
       closeConnection(_args, cb) {
         return cb(null, { closeConnectionResult: 'OK' });
       },
     },
   },
 };
+
 
 // ---------- Montar servidor ----------
 const server = http.createServer(app);
