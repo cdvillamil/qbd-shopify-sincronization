@@ -83,6 +83,8 @@ function parseInventory(qbxml){
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 
+app.use('/debug', require('./routes/debug.inventory'));
+
 /* Health & debug */
 app.get('/healthz', (_req,res)=>res.json({ok:true}));
 app.get('/debug/config', (_req,res)=>res.json({
