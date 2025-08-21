@@ -1,261 +1,215 @@
+// src/services/qbwcService.js
 'use strict';
+
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { Parser } = require('xml2js');
 
-const LOG_DIR = '/tmp';
-const JOBS_PATH = path.join(LOG_DIR, 'jobs.json');
-const LAST_REQ_QBXML = path.join(LOG_DIR, 'last-request-qbxml.xml');
-const LAST_RESP_XML = path.join(LOG_DIR, 'last-response.xml');
-const LAST_RESP_XML_TS = () => path.join(LOG_DIR, `last-response-${Date.now()}.xml`);
-const LAST_INVENTORY = path.join(LOG_DIR, 'last-inventory.json');
-const LAST_POST = path.join(LOG_DIR, 'last-post-body.xml');
-const LAST_AUTH_REQ = path.join(LOG_DIR, 'last-auth-request.xml');
-const LAST_AUTH_RESP = path.join(LOG_DIR, 'last-auth-response.xml');
-const LAST_AUTH_CRED = path.join(LOG_DIR, 'last-auth-cred.json');
+/**
+ * OBJETIVO
+ * - Mantener authenticate EXACTO (usuario/contraseña desde variables de entorno).
+ * - Implementar sendRequestXML para que SIEMPRE devuelva un QBXML de inventario (pull bajo demanda en cada corrida).
+ * - Implementar receiveResponseXML para parsear ItemInventory, ItemInventoryAssembly y (si aplica) ItemSites (Advanced Inventory).
+ * - Guardar archivos de depuración en /tmp para validar fácilmente desde tus endpoints actuales (/debug/*).
+ *
+ * No agrega dependencias y no requiere cambios en index.js ni en el WSDL.
+ */
 
-const WC_USER = process.env.WC_USERNAME || '';
-const WC_PASS = process.env.WC_PASSWORD || '';
-const HAS_ADV_INV = (process.env.HAS_ADV_INV || '').toString() === '1';
+/* =========================
+   Configuración y helpers
+   ========================= */
+const LOG_DIR = process.env.LOG_DIR || '/tmp';
+const HAS_ADV_INV = (process.env.HAS_ADV_INV || '').toString() === '1'; // 1 si tu QBD tiene Advanced Inventory
+const QB_MAX = Number(process.env.QB_MAX || 200) || 200;                // límite de ítems a pedir en cada tipo
+const TNS = 'http://developer.intuit.com/';
 
-/* ---------------------------- utilidades básicas --------------------------- */
+const APP_USER = process.env.WC_USERNAME || '';
+const APP_PASS = process.env.WC_PASSWORD || '';
 
-function safeWrite(file, data) {
-  try { fs.writeFileSync(file, data, 'utf8'); } catch { /* no-op */ }
-}
-function safeJson(file, obj) { safeWrite(file, JSON.stringify(obj, null, 2)); }
-function readJobs() {
-  try { return JSON.parse(fs.readFileSync(JOBS_PATH, 'utf8')); } catch { return []; }
-}
-function writeJobs(arr) { safeJson(JOBS_PATH, Array.isArray(arr) ? arr : []); }
-
+function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch { /* noop */ } }
+function save(name, txt) { ensureDir(LOG_DIR); fs.writeFileSync(path.join(LOG_DIR, name), txt ?? '', 'utf8'); }
+function read(name) { try { return fs.readFileSync(path.join(LOG_DIR, name), 'utf8'); } catch { return null; } }
 function sha256(s) { return crypto.createHash('sha256').update(s || '').digest('hex'); }
 
-/* --------------------------- construcción de QBXML ------------------------- */
-
-function buildInventoryQueryQBXML(max = 100) {
-  const header = '<?xml version="1.0"?><?qbxml version="16.0"?>';
+/* =========================
+   Construcción de QBXML
+   ========================= */
+function buildInventoryQBXML(max = QB_MAX) {
   const inv = `
-    <ItemInventoryQueryRq requestID="inv-1">
+    <ItemInventoryQueryRq requestID="1">
+      <ActiveStatus>All</ActiveStatus>
       <OwnerID>0</OwnerID>
       <MaxReturned>${max}</MaxReturned>
-      <ActiveStatus>All</ActiveStatus>
     </ItemInventoryQueryRq>`;
+
   const asm = `
-    <ItemInventoryAssemblyQueryRq requestID="asm-1">
+    <ItemInventoryAssemblyQueryRq requestID="2">
+      <ActiveStatus>All</ActiveStatus>
       <OwnerID>0</OwnerID>
       <MaxReturned>${max}</MaxReturned>
-      <ActiveStatus>All</ActiveStatus>
     </ItemInventoryAssemblyQueryRq>`;
-  // Solo pedir ItemSites si el company tiene Advanced Inventory
+
   const sites = HAS_ADV_INV ? `
-    <ItemSitesQueryRq requestID="sites-1">
+    <ItemSitesQueryRq requestID="3">
       <ActiveStatus>All</ActiveStatus>
       <OwnerID>0</OwnerID>
       <MaxReturned>${max}</MaxReturned>
     </ItemSitesQueryRq>` : '';
 
-  const body = `<QBXML><QBXMLMsgsRq onError="stopOnError">${inv}${asm}${sites}</QBXMLMsgsRq></QBXML>`;
-  const qbxml = header + body;
-  safeWrite(LAST_REQ_QBXML, qbxml);
+  const qbxml = `<?xml version="1.0"?><?qbxml version="16.0"?>
+<QBXML>
+  <QBXMLMsgsRq onError="stopOnError">
+    ${inv}${asm}${sites}
+  </QBXMLMsgsRq>
+</QBXML>`;
+
+  save('last-request-qbxml.xml', qbxml);
   return qbxml;
 }
 
-/* ---------------------------- parser de respuestas ------------------------- */
-
-// xml2js configurado para conservar atributos y arrays
-const parser = new Parser({ explicitArray: false, ignoreAttrs: false, mergeAttrs: true });
-
-// Recolector genérico que busca Ret de inventario en cualquier respuesta
-function collectInventoryFromRs(rsNode, acc) {
-  if (!rsNode || typeof rsNode !== 'object') return;
-
-  // ItemInventoryQueryRs -> ItemInventoryRet
-  if (rsNode.ItemInventoryRet) {
-    const list = Array.isArray(rsNode.ItemInventoryRet) ? rsNode.ItemInventoryRet : [rsNode.ItemInventoryRet];
-    list.forEach((it) => acc.push({ Type: 'ItemInventoryRet', ...it }));
-  }
-
-  // ItemInventoryAssemblyQueryRs -> ItemInventoryAssemblyRet
-  if (rsNode.ItemInventoryAssemblyRet) {
-    const list = Array.isArray(rsNode.ItemInventoryAssemblyRet) ? rsNode.ItemInventoryAssemblyRet : [rsNode.ItemInventoryAssemblyRet];
-    list.forEach((it) => acc.push({ Type: 'ItemInventoryAssemblyRet', ...it }));
-  }
-
-  // ItemSitesQueryRs -> ItemSitesRet (solo si hay Advanced Inventory)
-  if (rsNode.ItemSitesRet) {
-    const list = Array.isArray(rsNode.ItemSitesRet) ? rsNode.ItemSitesRet : [rsNode.ItemSitesRet];
-    list.forEach((it) => acc.push({ Type: 'ItemSitesRet', ...it }));
-  }
-
-  // Algunos QB devuelven ItemQueryRs con ItemRet y Type
-  if (rsNode.ItemRet) {
-    const list = Array.isArray(rsNode.ItemRet) ? rsNode.ItemRet : [rsNode.ItemRet];
-    list.forEach((it) => {
-      const t = it.Type || '';
-      if (/Inventory/i.test(t) || /Assembly/i.test(t)) acc.push({ Type: `ItemRet:${t}`, ...it });
-    });
-  }
+/* =========================
+   Parser simple (sin libs)
+   ========================= */
+// Matchea bloques <Tag> ... </Tag> incluso multi-línea
+function blocks(xml, tag) {
+  return xml.match(new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, 'g')) || [];
+}
+// Extrae el contenido de <tag>valor</tag>
+function val(block, tag) {
+  const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return m ? m[1] : '';
 }
 
-async function parseAndStoreInventory(xml) {
-  safeWrite(LAST_RESP_XML, xml);
-  safeWrite(LAST_RESP_XML_TS(), xml);
-
-  const js = await parser.parseStringPromise(xml).catch(() => null);
+function parseInventory(qbxml) {
   const out = [];
 
-  const msgs = js?.QBXML?.QBXMLMsgsRs;
-  if (!msgs) {
-    safeJson(LAST_INVENTORY, { count: 0, items: [] });
-    return { count: 0, items: [] };
+  // Ítems de inventario
+  for (const b of blocks(qbxml, 'ItemInventoryRet')) {
+    out.push({
+      Type: 'ItemInventoryRet',
+      ListID: val(b, 'ListID') || null,
+      FullName: val(b, 'FullName') || val(b, 'Name') || null,
+      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0),
+      EditSequence: val(b, 'EditSequence') || null
+    });
   }
 
-  // msgs puede ser objeto con múltiples *Rs
-  const rsKeys = Object.keys(msgs);
-  rsKeys.forEach((k) => {
-    const node = msgs[k];
-    if (Array.isArray(node)) node.forEach((n) => collectInventoryFromRs(n, out));
-    else collectInventoryFromRs(node, out);
-  });
+  // Ensambles de inventario
+  for (const b of blocks(qbxml, 'ItemInventoryAssemblyRet')) {
+    out.push({
+      Type: 'ItemInventoryAssemblyRet',
+      ListID: val(b, 'ListID') || null,
+      FullName: val(b, 'FullName') || val(b, 'Name') || null,
+      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0),
+      EditSequence: val(b, 'EditSequence') || null
+    });
+  }
 
-  // Normaliza campos básicos para inspección rápida
-  const normalized = out.map((it) => {
-    const base = {
-      Type: it.Type,
-      ListID: it.ListID || it.ItemInventoryRef?.ListID || null,
-      FullName: it.FullName || it.Name || it.ItemInventoryRef?.FullName || null,
-      EditSequence: it.EditSequence || null,
-    };
-    // Cantidades (distintos nombres según tipo)
-    const qoh = it.QuantityOnHand ?? it.OnHand ?? null;
-    const qavail = it.QuantityOnHandAvailable ?? it.QuantityOnOrder ?? null;
-    return { ...base, QuantityOnHand: qoh, QuantityAvailableOrOnOrder: qavail, raw: it };
-  });
+  // Niveles por sitio (si hay Advanced Inventory)
+  for (const b of blocks(qbxml, 'ItemSitesRet')) {
+    const itemRef = (b.match(/<ItemInventoryRef>[\\s\\S]*?<\\/ItemInventoryRef>/i) || [null])[0]
+                 || (b.match(/<ItemRef>[\\s\\S]*?<\\/ItemRef>/i) || [null])[0] || '';
+    const siteRef = (b.match(/<SiteRef>[\\s\\S]*?<\\/SiteRef>/i) || [null])[0] || '';
+    out.push({
+      Type: 'ItemSitesRet',
+      ItemFullName: val(itemRef, 'FullName') || null,
+      SiteFullName: val(siteRef, 'FullName') || null,
+      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0)
+    });
+  }
 
-  safeJson(LAST_INVENTORY, { count: normalized.length, items: normalized });
-  return { count: normalized.length, items: normalized };
+  return out;
 }
 
-/* -------------------------- servicio SOAP (factory) ------------------------ */
-
+/* =========================
+   Servicio SOAP
+   ========================= */
 function qbwcServiceFactory() {
-  // ¡NO toques authenticate! — mantiene el mismo comportamiento
-  const svc = {
-    QBWebConnectorSvcSoap: {
-      QBWebConnectorSvcSoap: {
-        serverVersion(args, cb) {
-          cb(null, { serverVersionResult: '1.0.0-dev' });
-        },
-        clientVersion(args, cb) {
-          cb(null, { clientVersionResult: '' }); // acepta cualquier WC
-        },
+  // Implementación real de los métodos
+  const impl = {
+    serverVersion(args, cb) {
+      cb(null, { serverVersionResult: '1.0.0-dev' });
+    },
 
-        // Mantén la autenticación tal como estaba
-        authenticate(args, cb) {
-          const user = (args?.strUserName || '').trim();
-          const pass = args?.strPassword || '';
+    clientVersion(args, cb) {
+      cb(null, { clientVersionResult: '' }); // Acepta cualquier versión del WC
+    },
 
-          // auditoría
-          safeWrite(LAST_AUTH_REQ, JSON.stringify({ Body: { authenticate: { strUserName: user, strPassword: pass } } }, null, 2));
+    authenticate(args, cb) {
+      const user = (args?.strUserName || '').trim();
+      const pass = args?.strPassword || '';
 
-          const matchUser = user === WC_USER;
-          const matchPass = pass === WC_PASS;
+      // Auditar lo recibido para /debug/last-auth-cred
+      save('last-auth-request.xml', JSON.stringify({ Body: { authenticate: { strUserName: user, strPassword: pass } } }, null, 2));
+      save('last-auth-cred.json', JSON.stringify({
+        ts: new Date().toISOString(),
+        receivedUser: user,
+        receivedPassLen: pass.length,
+        receivedPassSha256: sha256(pass),
+        envUser: APP_USER,
+        envPassLen: APP_PASS.length,
+        envPassSha256: sha256(APP_PASS),
+        matchUser: user === APP_USER,
+        matchPassHash: pass === APP_PASS
+      }, null, 2));
 
-          safeJson(LAST_AUTH_CRED, {
-            ts: new Date().toISOString(),
-            receivedUser: user,
-            receivedPassLen: pass.length,
-            receivedPassSha256: sha256(pass),
-            envUser: WC_USER,
-            envPassLen: WC_PASS.length,
-            envPassSha256: sha256(WC_PASS),
-            matchUser,
-            matchPassHash: matchPass
-          });
-
-          if (!matchUser || !matchPass) {
-            // Señaliza fallo estándar
-            const envelope = `<?xml version="1.0" encoding="utf-8"?>
-              <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://developer.intuit.com/">
-                <soap:Body><tns:authenticateResponse>
-                  <authenticateResult><string></string><string>nvu</string></authenticateResult>
-                </tns:authenticateResponse></soap:Body>
-              </soap:Envelope>`;
-            safeWrite(LAST_AUTH_RESP, envelope);
-            return cb(null, { authenticateResult: ['', 'nvu'] });
-          }
-
-          const ticket = crypto.randomUUID();
-          // devuelve el ticket y (opcional) CompanyFile; dejamos vacío para usar el abierto
-          const envelope = `<?xml version="1.0" encoding="utf-8"?>
-            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://developer.intuit.com/">
-              <soap:Body><tns:authenticateResponse>
-                <authenticateResult><string>${ticket}</string><string>none</string></authenticateResult>
-              </tns:authenticateResponse></soap:Body>
-            </soap:Envelope>`;
-          safeWrite(LAST_AUTH_RESP, envelope);
-          cb(null, { authenticateResult: [ticket, 'none'] });
-        },
-
-        // Devuelve QBXML sólo si hay trabajo pendiente
-        sendRequestXML(args, cb) {
-          const jobs = readJobs();
-          const job = jobs[0];
-
-          // guarda el POST crudo si WC lo envía (no siempre viene aquí)
-          if (args && typeof args === 'object') {
-            try { safeWrite(LAST_POST, JSON.stringify(args, null, 2)); } catch {}
-          }
-
-          if (!job) {
-            // Nada que hacer → cadena vacía = 0% trabajo pendiente
-            return cb(null, { sendRequestXMLResult: '' });
-          }
-
-          if (job.type === 'inventoryQuery') {
-            const max = Number(job.max || 100) || 100;
-            const qbxml = buildInventoryQueryQBXML(max);
-            // consumimos el job
-            jobs.shift();
-            writeJobs(jobs);
-            return cb(null, { sendRequestXMLResult: qbxml });
-          }
-
-          // Tipo desconocido → no hacer nada
-          return cb(null, { sendRequestXMLResult: '' });
-        },
-
-        // Parsea la respuesta; devuelve el % restante
-        receiveResponseXML(args, cb) {
-          const xml = args?.response ?? args?.responseXml ?? args?.strResponseXML ?? '';
-          const percent = Number(args?.hresult || 0); // WC no siempre lo usa; ignoramos
-
-          safeWrite(LAST_RESP_XML, xml);
-          safeWrite(LAST_RESP_XML_TS(), xml);
-
-          // Intenta parsear; si falla, no bloqueamos el ciclo
-          parseAndStoreInventory(xml)
-            .then(({ count }) => {
-              // 100 = no más trabajo en esta sesión
-              cb(null, { receiveResponseXMLResult: 100 });
-            })
-            .catch(() => cb(null, { receiveResponseXMLResult: 100 }));
-        },
-
-        getLastError(args, cb) {
-          cb(null, { getLastErrorResult: '' });
-        },
-
-        closeConnection(args, cb) {
-          cb(null, { closeConnectionResult: 'OK' });
-        }
+      if (user !== APP_USER || pass !== APP_PASS) {
+        // Not valid user → nvu (not valid user)
+        save('last-auth-response.xml',
+          `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="${TNS}"><soap:Body><tns:authenticateResponse><authenticateResult><string></string><string>nvu</string></authenticateResult></tns:authenticateResponse></soap:Body></soap:Envelope>`);
+        return cb(null, { authenticateResult: ['', 'nvu'] });
       }
+
+      const ticket = crypto.randomUUID();
+      // 'none' = usar el company file actualmente abierto en QBD
+      save('last-auth-response.xml',
+        `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="${TNS}"><soap:Body><tns:authenticateResponse><authenticateResult><string>${ticket}</string><string>none</string></authenticateResult></tns:authenticateResponse></soap:Body></soap:Envelope>`);
+      cb(null, { authenticateResult: [ticket, 'none'] });
+    },
+
+    /**
+     * Devuelve QBXML de inventario en cada corrida.
+     * (Si prefieres “bajo demanda”, aquí se podría leer un trigger/cola; por simplicidad, lo enviamos siempre).
+     */
+    sendRequestXML(args, cb) {
+      const qbxml = buildInventoryQBXML(QB_MAX);
+      // IMPORTANTE: node-soap se encarga del envelope, aquí solo devolver el QBXML
+      cb(null, { sendRequestXMLResult: qbxml });
+    },
+
+    /**
+     * Recibe la respuesta QBXML, la guarda y la parsea a JSON consolidado en /tmp/last-inventory.json
+     */
+    receiveResponseXML(args, cb) {
+      const xml = args?.response || args?.responseXml || args?.strResponseXML || '';
+      save(`last-response-${Date.now()}.xml`, xml);
+      save('last-response.xml', xml);
+
+      const items = parseInventory(xml);
+      save('last-inventory.json', JSON.stringify({ count: items.length, items }, null, 2));
+
+      // 100 = no hay más trabajo en esta sesión
+      cb(null, { receiveResponseXMLResult: 100 });
+    },
+
+    getLastError(args, cb) {
+      cb(null, { getLastErrorResult: '' });
+    },
+
+    closeConnection(args, cb) {
+      cb(null, { closeConnectionResult: 'OK' });
     }
   };
 
-  return svc;
+  /**
+   * Mapeos de servicio/puerto:
+   * Usamos ambos nombres para ser tolerantes a variaciones del WSDL.
+   * (Tu WSDL ha mostrado “QBWebConnectorSvcSoap” en los logs, así que ese puerto existe).
+   */
+  return {
+    QBWebConnectorSvc: { QBWebConnectorSvcSoap: impl },
+    QBWebConnectorSvcSoap: { QBWebConnectorSvcSoap: impl }
+  };
 }
 
 module.exports = { qbwcServiceFactory };
