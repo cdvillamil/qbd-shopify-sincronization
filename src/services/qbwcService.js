@@ -1,215 +1,260 @@
-// src/services/qbwcService.js
-'use strict';
+// qbwcService.js
+// — Consulta de inventario (ItemInventoryQueryRq con iterator) + rutas de debug —
+// Requiere: npm i fast-xml-parser@4
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
+const { XMLParser } = require('fast-xml-parser');
 
-/**
- * OBJETIVO
- * - Mantener authenticate EXACTO (usuario/contraseña desde variables de entorno).
- * - Implementar sendRequestXML para que SIEMPRE devuelva un QBXML de inventario (pull bajo demanda en cada corrida).
- * - Implementar receiveResponseXML para parsear ItemInventory, ItemInventoryAssembly y (si aplica) ItemSites (Advanced Inventory).
- * - Guardar archivos de depuración en /tmp para validar fácilmente desde tus endpoints actuales (/debug/*).
- *
- * No agrega dependencias y no requiere cambios en index.js ni en el WSDL.
- */
+const DATA_DIR = path.join(__dirname, 'data');
+const INVENTORY_PATH = path.join(DATA_DIR, 'inventory.json');
+const DEBUG_PATH = path.join(DATA_DIR, 'lastResponse.json');
 
-/* =========================
-   Configuración y helpers
-   ========================= */
-const LOG_DIR = process.env.LOG_DIR || '/tmp';
-const HAS_ADV_INV = (process.env.HAS_ADV_INV || '').toString() === '1'; // 1 si tu QBD tiene Advanced Inventory
-const QB_MAX = Number(process.env.QB_MAX || 200) || 200;                // límite de ítems a pedir en cada tipo
-const TNS = 'http://developer.intuit.com/';
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const APP_USER = process.env.WC_USERNAME || '';
-const APP_PASS = process.env.WC_PASSWORD || '';
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',
+  trimValues: true,
+});
 
-function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch { /* noop */ } }
-function save(name, txt) { ensureDir(LOG_DIR); fs.writeFileSync(path.join(LOG_DIR, name), txt ?? '', 'utf8'); }
-function read(name) { try { return fs.readFileSync(path.join(LOG_DIR, name), 'utf8'); } catch { return null; } }
-function sha256(s) { return crypto.createHash('sha256').update(s || '').digest('hex'); }
+const state = {
+  // Control de la sesión del WC
+  started: false,
+  step: null,           // 'INV_START' | 'INV_CONT' | null
+  iteratorID: null,
 
-/* =========================
-   Construcción de QBXML
-   ========================= */
-function buildInventoryQBXML(max = QB_MAX) {
-  const inv = `
-    <ItemInventoryQueryRq requestID="1">
-      <ActiveStatus>All</ActiveStatus>
-      <OwnerID>0</OwnerID>
-      <MaxReturned>${max}</MaxReturned>
-    </ItemInventoryQueryRq>`;
+  // Datos de depuración
+  lastRequestXml: null,
+  lastResponseXml: null,
+  updatedAt: null,
 
-  const asm = `
-    <ItemInventoryAssemblyQueryRq requestID="2">
-      <ActiveStatus>All</ActiveStatus>
-      <OwnerID>0</OwnerID>
-      <MaxReturned>${max}</MaxReturned>
-    </ItemInventoryAssemblyQueryRq>`;
+  // Inventario en memoria
+  inventory: [],
+};
 
-  const sites = HAS_ADV_INV ? `
-    <ItemSitesQueryRq requestID="3">
-      <ActiveStatus>All</ActiveStatus>
-      <OwnerID>0</OwnerID>
-      <MaxReturned>${max}</MaxReturned>
-    </ItemSitesQueryRq>` : '';
+// Helpers de persistencia
+function saveDebug() {
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    lastRequestXml: state.lastRequestXml,
+    lastResponseXml: state.lastResponseXml,
+  };
+  try {
+    fs.writeFileSync(DEBUG_PATH, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (_) {}
+}
 
-  const qbxml = `<?xml version="1.0"?><?qbxml version="16.0"?>
+function saveInventory() {
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    count: state.inventory.length,
+    items: state.inventory,
+  };
+  try {
+    fs.writeFileSync(INVENTORY_PATH, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (_) {}
+}
+
+function loadInventoryFromDisk() {
+  try {
+    if (fs.existsSync(INVENTORY_PATH)) {
+      const raw = fs.readFileSync(INVENTORY_PATH, 'utf8');
+      const json = JSON.parse(raw);
+      state.inventory = Array.isArray(json.items) ? json.items : [];
+    }
+  } catch (_) {
+    // si falla, dejamos inventory en []
+  }
+}
+
+// Helpers de parsing y tipos
+const toNum = (v) => (v === undefined || v === null || v === '' ? null : Number(v));
+const toBool = (v) => String(v).toLowerCase() === 'true';
+
+// ==========================
+// QBXML builders
+// ==========================
+const QBXML_HEADER = `<?xml version="1.0" encoding="utf-8"?>\n<?qbxml version="13.0"?>`;
+
+function buildItemInventoryQueryStart() {
+  // Primer batch con iterator="Start"
+  return `${QBXML_HEADER}
 <QBXML>
-  <QBXMLMsgsRq onError="stopOnError">
-    ${inv}${asm}${sites}
+  <QBXMLMsgsRq onError="continueOnError">
+    <ItemInventoryQueryRq requestID="inv-1" iterator="Start">
+      <ActiveStatus>All</ActiveStatus>
+      <OwnerID>0</OwnerID>
+      <IncludeRetElement>ListID</IncludeRetElement>
+      <IncludeRetElement>FullName</IncludeRetElement>
+      <IncludeRetElement>IsActive</IncludeRetElement>
+      <IncludeRetElement>SalesDesc</IncludeRetElement>
+      <IncludeRetElement>SalesPrice</IncludeRetElement>
+      <IncludeRetElement>PurchaseCost</IncludeRetElement>
+      <IncludeRetElement>QuantityOnHand</IncludeRetElement>
+    </ItemInventoryQueryRq>
   </QBXMLMsgsRq>
 </QBXML>`;
+}
 
-  save('last-request-qbxml.xml', qbxml);
+function buildItemInventoryQueryContinue(iteratorID) {
+  return `${QBXML_HEADER}
+<QBXML>
+  <QBXMLMsgsRq onError="continueOnError">
+    <ItemInventoryQueryRq requestID="inv-cont" iterator="Continue" iteratorID="${iteratorID}">
+      <OwnerID>0</OwnerID>
+    </ItemInventoryQueryRq>
+  </QBXMLMsgsRq>
+</QBXML>`;
+}
+
+// ==========================
+// Public API esperada por tu SOAP server
+// ==========================
+
+// IMPORTANTE: no cambiamos la lógica de auth; asumimos que tu SOAP server ya la maneja.
+// Aquí solo arrancamos la “tarea” de inventario cuando el WC entra al ciclo de requests.
+function sendRequestXML() {
+  // Si no se ha iniciado la sesión, preparamos el primer paso
+  if (!state.started) {
+    state.started = true;
+    state.step = 'INV_START';
+    state.iteratorID = null;
+    state.inventory = []; // limpiamos para refrescar
+  }
+
+  let qbxml = '';
+
+  if (state.step === 'INV_START') {
+    qbxml = buildItemInventoryQueryStart();
+  } else if (state.step === 'INV_CONT' && state.iteratorID) {
+    qbxml = buildItemInventoryQueryContinue(state.iteratorID);
+  } else {
+    // No hay más trabajo; devolvemos cadena vacía
+    qbxml = '';
+    // Al retornar vacío, el WC llamará a closeConnection
+  }
+
+  state.lastRequestXml = qbxml || '(no more work)';
+  state.updatedAt = new Date().toISOString();
+  saveDebug();
+
   return qbxml;
 }
 
-/* =========================
-   Parser simple (sin libs)
-   ========================= */
-// Matchea bloques <Tag> ... </Tag> incluso multi-línea
-function blocks(xml, tag) {
-  return xml.match(new RegExp(`<${tag}[\\s\\S]*?<\\/${tag}>`, 'g')) || [];
-}
-// Extrae el contenido de <tag>valor</tag>
-function val(block, tag) {
-  const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return m ? m[1] : '';
-}
+function receiveResponseXML(qbResponseXml /*, hresult, message */) {
+  // Guardamos la respuesta cruda para debug
+  state.lastResponseXml = qbResponseXml;
+  state.updatedAt = new Date().toISOString();
 
-function parseInventory(qbxml) {
-  const out = [];
+  // Parse básico
+  let remaining = 0;
+  let nextIteratorID = null;
+  try {
+    const json = parser.parse(qbResponseXml);
+    const msgs = json?.QBXML?.QBXMLMsgsRs;
+    const rs = msgs?.ItemInventoryQueryRs;
 
-  // Ítems de inventario
-  for (const b of blocks(qbxml, 'ItemInventoryRet')) {
-    out.push({
-      Type: 'ItemInventoryRet',
-      ListID: val(b, 'ListID') || null,
-      FullName: val(b, 'FullName') || val(b, 'Name') || null,
-      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0),
-      EditSequence: val(b, 'EditSequence') || null
-    });
-  }
+    if (rs) {
+      // iteratorRemainingCount / iteratorID
+      remaining = Number(rs?.iteratorRemainingCount || 0);
+      nextIteratorID = rs?.iteratorID || null;
 
-  // Ensambles de inventario
-  for (const b of blocks(qbxml, 'ItemInventoryAssemblyRet')) {
-    out.push({
-      Type: 'ItemInventoryAssemblyRet',
-      ListID: val(b, 'ListID') || null,
-      FullName: val(b, 'FullName') || val(b, 'Name') || null,
-      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0),
-      EditSequence: val(b, 'EditSequence') || null
-    });
-  }
+      // ItemInventoryRet puede ser objeto o arreglo
+      const rets = rs?.ItemInventoryRet
+        ? Array.isArray(rs.ItemInventoryRet)
+          ? rs.ItemInventoryRet
+          : [rs.ItemInventoryRet]
+        : [];
 
-  // Niveles por sitio (si hay Advanced Inventory)
-  for (const b of blocks(qbxml, 'ItemSitesRet')) {
-    const itemRef = (b.match(/<ItemInventoryRef>[\\s\\S]*?<\\/ItemInventoryRef>/i) || [null])[0]
-                 || (b.match(/<ItemRef>[\\s\\S]*?<\\/ItemRef>/i) || [null])[0] || '';
-    const siteRef = (b.match(/<SiteRef>[\\s\\S]*?<\\/SiteRef>/i) || [null])[0] || '';
-    out.push({
-      Type: 'ItemSitesRet',
-      ItemFullName: val(itemRef, 'FullName') || null,
-      SiteFullName: val(siteRef, 'FullName') || null,
-      QuantityOnHand: Number(val(b, 'QuantityOnHand') || 0)
-    });
-  }
+      const mapped = rets.map((r) => ({
+        ListID: r.ListID ?? null,
+        FullName: r.FullName ?? null,
+        IsActive: toBool(r.IsActive),
+        SalesDesc: r.SalesDesc ?? null,
+        SalesPrice: toNum(r.SalesPrice),
+        PurchaseCost: toNum(r.PurchaseCost),
+        QuantityOnHand: toNum(r.QuantityOnHand),
+      }));
 
-  return out;
-}
-
-/* =========================
-   Servicio SOAP
-   ========================= */
-function qbwcServiceFactory() {
-  // Implementación real de los métodos
-  const impl = {
-    serverVersion(args, cb) {
-      cb(null, { serverVersionResult: '1.0.0-dev' });
-    },
-
-    clientVersion(args, cb) {
-      cb(null, { clientVersionResult: '' }); // Acepta cualquier versión del WC
-    },
-
-    authenticate(args, cb) {
-      const user = (args?.strUserName || '').trim();
-      const pass = args?.strPassword || '';
-
-      // Auditar lo recibido para /debug/last-auth-cred
-      save('last-auth-request.xml', JSON.stringify({ Body: { authenticate: { strUserName: user, strPassword: pass } } }, null, 2));
-      save('last-auth-cred.json', JSON.stringify({
-        ts: new Date().toISOString(),
-        receivedUser: user,
-        receivedPassLen: pass.length,
-        receivedPassSha256: sha256(pass),
-        envUser: APP_USER,
-        envPassLen: APP_PASS.length,
-        envPassSha256: sha256(APP_PASS),
-        matchUser: user === APP_USER,
-        matchPassHash: pass === APP_PASS
-      }, null, 2));
-
-      if (user !== APP_USER || pass !== APP_PASS) {
-        // Not valid user → nvu (not valid user)
-        save('last-auth-response.xml',
-          `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="${TNS}"><soap:Body><tns:authenticateResponse><authenticateResult><string></string><string>nvu</string></authenticateResult></tns:authenticateResponse></soap:Body></soap:Envelope>`);
-        return cb(null, { authenticateResult: ['', 'nvu'] });
+      if (mapped.length) {
+        state.inventory.push(...mapped);
+        saveInventory(); // vamos grabando en disco por si el WC corta
       }
-
-      const ticket = crypto.randomUUID();
-      // 'none' = usar el company file actualmente abierto en QBD
-      save('last-auth-response.xml',
-        `<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="${TNS}"><soap:Body><tns:authenticateResponse><authenticateResult><string>${ticket}</string><string>none</string></authenticateResult></tns:authenticateResponse></soap:Body></soap:Envelope>`);
-      cb(null, { authenticateResult: [ticket, 'none'] });
-    },
-
-    /**
-     * Devuelve QBXML de inventario en cada corrida.
-     * (Si prefieres “bajo demanda”, aquí se podría leer un trigger/cola; por simplicidad, lo enviamos siempre).
-     */
-    sendRequestXML(args, cb) {
-      const qbxml = buildInventoryQBXML(QB_MAX);
-      // IMPORTANTE: node-soap se encarga del envelope, aquí solo devolver el QBXML
-      cb(null, { sendRequestXMLResult: qbxml });
-    },
-
-    /**
-     * Recibe la respuesta QBXML, la guarda y la parsea a JSON consolidado en /tmp/last-inventory.json
-     */
-    receiveResponseXML(args, cb) {
-      const xml = args?.response || args?.responseXml || args?.strResponseXML || '';
-      save(`last-response-${Date.now()}.xml`, xml);
-      save('last-response.xml', xml);
-
-      const items = parseInventory(xml);
-      save('last-inventory.json', JSON.stringify({ count: items.length, items }, null, 2));
-
-      // 100 = no hay más trabajo en esta sesión
-      cb(null, { receiveResponseXMLResult: 100 });
-    },
-
-    getLastError(args, cb) {
-      cb(null, { getLastErrorResult: '' });
-    },
-
-    closeConnection(args, cb) {
-      cb(null, { closeConnectionResult: 'OK' });
     }
-  };
+  } catch (err) {
+    // Si hay error de parseo, igual persistimos el raw
+  } finally {
+    saveDebug();
+  }
 
-  /**
-   * Mapeos de servicio/puerto:
-   * Usamos ambos nombres para ser tolerantes a variaciones del WSDL.
-   * (Tu WSDL ha mostrado “QBWebConnectorSvcSoap” en los logs, así que ese puerto existe).
-   */
+  if (remaining > 0 && nextIteratorID) {
+    // Aún falta; pedimos otro batch
+    state.step = 'INV_CONT';
+    state.iteratorID = nextIteratorID;
+
+    // Indicamos al WC que todavía no terminamos (cualquier número < 100 sirve)
+    return 0; // 0% done -> sigue llamando a sendRequestXML
+  }
+
+  // Listo, no hay más resultados
+  state.step = null;
+  state.iteratorID = null;
+  state.started = false;
+
+  // 100 = finished
+  return 100;
+}
+
+function closeConnection() {
+  // Puedes registrar logs aquí si lo necesitas
+  return 'OK';
+}
+
+// ==========================
+// Endpoints de apoyo (usados por /debug/*)
+// ==========================
+function getDebugInfo() {
+  // Intenta leer del archivo para que incluso tras reinicios tengamos algo
+  let disk = {};
+  try {
+    if (fs.existsSync(DEBUG_PATH)) {
+      disk = JSON.parse(fs.readFileSync(DEBUG_PATH, 'utf8'));
+    }
+  } catch (_) {}
   return {
-    QBWebConnectorSvc: { QBWebConnectorSvcSoap: impl },
-    QBWebConnectorSvcSoap: { QBWebConnectorSvcSoap: impl }
+    updatedAt: state.updatedAt || disk.updatedAt || null,
+    lastRequestXml: state.lastRequestXml || disk.lastRequestXml || null,
+    lastResponseXml: state.lastResponseXml || disk.lastResponseXml || null,
   };
 }
 
-module.exports = { qbwcServiceFactory };
+function getInventory() {
+  // Sincroniza con disco si el array está vacío (p.ej. tras reinicio)
+  if (state.inventory.length === 0) {
+    loadInventoryFromDisk();
+  }
+  return {
+    count: state.inventory.length,
+    items: state.inventory,
+  };
+}
+
+// (Opcional) limpiar cache de inventario manualmente
+function resetInventory() {
+  state.inventory = [];
+  saveInventory();
+}
+
+// Export público
+module.exports = {
+  // Ciclo de WC
+  sendRequestXML,
+  receiveResponseXML,
+  closeConnection,
+
+  // Debug/consulta
+  getDebugInfo,
+  getInventory,
+  resetInventory,
+};
