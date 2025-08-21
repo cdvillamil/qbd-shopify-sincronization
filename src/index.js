@@ -6,6 +6,8 @@ const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
 const { buildInventoryQueryXML } = require('./services/inventory');
+const { parseAndPersistInventory } = require('./services/inventory-parse');
+
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -50,6 +52,10 @@ function writeJobs(list){ ensureLogDir(); fs.writeFileSync(JOBS_FILE, JSON.strin
 function enqueue(job){ const L = readJobs(); L.push(job); writeJobs(L); }
 function peekJob(){ const L = readJobs(); return L[0] || null; }
 function popJob(){ const L = readJobs(); const j = L.shift(); writeJobs(L); return j||null; }
+
+// 🔽 añade esto justo después de escribir /tmp/last-response.xml
+try { parseAndPersistInventory(response); } catch (e) { console.error('Inventory parse error:', e); }
+
 
 /* Generar QBXML según el job */
 function qbxmlFor(job) {
