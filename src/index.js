@@ -76,37 +76,40 @@ function parseInventory(qbxml){
   const out = [];
 
   // ItemInventoryRet
-  for (const b of blocks(qbxml, 'ItemInventoryRet')){
+  for (const b of qbxml.match(/<ItemInventoryRet[\s\S]*?<\/ItemInventoryRet>/g) || []) {
     out.push({
       Type: 'ItemInventoryRet',
-      ListID: val(b,'ListID'),
-      FullName: val(b,'FullName') || val(b,'Name'),
-      QuantityOnHand: Number(val(b,'QuantityOnHand') || 0),
-      EditSequence: val(b,'EditSequence') || null
+      ListID: (b.match(/<ListID>([\s\S]*?)<\/ListID>/i) || [,''])[1],
+      FullName: (b.match(/<FullName>([\s\S]*?)<\/FullName>/i) || [,''])[1] || (b.match(/<Name>([\s\S]*?)<\/Name>/i) || [,''])[1],
+      QuantityOnHand: Number((b.match(/<QuantityOnHand>([\s\S]*?)<\/QuantityOnHand>/i) || [,''])[1] || 0),
+      EditSequence: (b.match(/<EditSequence>([\s\S]*?)<\/EditSequence>/i) || [,''])[1] || null
     });
   }
 
   // ItemInventoryAssemblyRet
-  for (const b of blocks(qbxml, 'ItemInventoryAssemblyRet')){
+  for (const b of qbxml.match(/<ItemInventoryAssemblyRet[\s\S]*?<\/ItemInventoryAssemblyRet>/g) || []) {
     out.push({
       Type: 'ItemInventoryAssemblyRet',
-      ListID: val(b,'ListID'),
-      FullName: val(b,'FullName') || val(b,'Name'),
-      QuantityOnHand: Number(val(b,'QuantityOnHand') || 0),
-      EditSequence: val(b,'EditSequence') || null
+      ListID: (b.match(/<ListID>([\s\S]*?)<\/ListID>/i) || [,''])[1],
+      FullName: (b.match(/<FullName>([\s\S]*?)<\/FullName>/i) || [,''])[1] || (b.match(/<Name>([\s\S]*?)<\/Name>/i) || [,''])[1],
+      QuantityOnHand: Number((b.match(/<QuantityOnHand>([\s\S]*?)<\/QuantityOnHand>/i) || [,''])[1] || 0),
+      EditSequence: (b.match(/<EditSequence>([\s\S]*?)<\/EditSequence>/i) || [,''])[1] || null
     });
   }
 
-  // ItemSitesRet (solo si existe; típico en Advanced Inventory)
-  for (const b of blocks(qbxml, 'ItemSitesRet')){
-    const itemRef = (b.match(/<ItemInventoryRef>[\\s\\S]*?<\\/ItemInventoryRef>/i)||[null])[0]
-                 || (b.match(/<ItemRef>[\\s\\S]*?<\\/ItemRef>/i)||[null])[0] || '';
-    const siteRef = (b.match(/<SiteRef>[\\s\\S]*?<\\/SiteRef>/i)||[null])[0] || '';
+  // ItemSitesRet (Advanced Inventory)
+  for (const b of qbxml.match(/<ItemSitesRet[\s\S]*?<\/ItemSitesRet>/g) || []) {
+    const itemRefBlock =
+      (b.match(/<ItemInventoryRef>[\s\S]*?<\/ItemInventoryRef>/i) || [null])[0] ||
+      (b.match(/<ItemRef>[\s\S]*?<\/ItemRef>/i) || [null])[0] || '';
+
+    const siteRefBlock = (b.match(/<SiteRef>[\s\S]*?<\/SiteRef>/i) || [null])[0] || '';
+
     out.push({
       Type: 'ItemSitesRet',
-      ItemFullName: val(itemRef, 'FullName') || null,
-      SiteFullName: val(siteRef, 'FullName') || null,
-      QuantityOnHand: Number(val(b,'QuantityOnHand') || 0)
+      ItemFullName: (itemRefBlock.match(/<FullName>([\s\S]*?)<\/FullName>/i) || [,''])[1] || null,
+      SiteFullName: (siteRefBlock.match(/<FullName>([\s\S]*?)<\/FullName>/i) || [,''])[1] || null,
+      QuantityOnHand: Number((b.match(/<QuantityOnHand>([\s\S]*?)<\/QuantityOnHand>/i) || [,''])[1] || 0)
     });
   }
 
