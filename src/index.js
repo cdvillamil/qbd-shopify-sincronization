@@ -1,332 +1,239 @@
-// index.js
 'use strict';
 
-/**
- * Servidor Express + SOAP para QuickBooks Web Connector
- * - Mantiene autenticación (usa QBWC_USERNAME/QBWC_PASSWORD si existen)
- * - Rutas de depuración: /debug/last-response y /debug/inventory
- * - Servicio SOAP expuesto en /qbwc (configurable con QBWC_PATH)
- * - Usa ./wsdl/qbwc.wsdl si existe; si no, WSDL embebido (address toma PUBLIC_URL)
- */
-
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
 const express = require('express');
-const soap = require('soap');
-const { randomUUID } = require('crypto');
+const morgan  = require('morgan');
+const path    = require('path');
+const fs      = require('fs');
+const crypto  = require('crypto');
+require('dotenv').config();
 
-// Carga .env si existe
-try { require('dotenv').config(); } catch (_) {}
+/* ===== Config ===== */
+const PORT      = process.env.PORT || 8080;             // En Azure Linux escucha 8080
+const BASE_PATH = process.env.BASE_PATH || '/qbwc';
+const LOG_DIR   = process.env.LOG_DIR || '/tmp';
+const TNS       = 'http://developer.intuit.com/';
+const JOBS_FILE = path.join(LOG_DIR, 'jobs.json');
+const CUR_JOB   = path.join(LOG_DIR, 'current-job.json');
 
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
-const SOAP_PATH = process.env.QBWC_PATH || '/qbwc';
-const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+function ensureLogDir(){ try{ fs.mkdirSync(LOG_DIR,{recursive:true}); }catch{} }
+function fp(n){ return path.join(LOG_DIR,n); }
+function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
+function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
+function sendFileSmart(res, file){
+  if(!fs.existsSync(file)) return res.status(404).send('not found');
+  const s = fs.readFileSync(file,'utf8'); 
+  const looksXml = s.trim().startsWith('<');
+  const looksJson = s.trim().startsWith('{')||s.trim().startsWith('[');
+  res.type(looksXml?'application/xml':looksJson?'application/json':'text/plain').send(s);
+}
+function extract(text, tag){
+  const m = text.match(new RegExp(`<(?:\\w*:)?${tag}>([\\s\\S]*?)<\\/(?:\\w*:)?${tag}>`));
+  return m ? m[1] : '';
+}
+function extractCredsFromXml(xml){
+  const user = extract(xml, 'strUserName') || extract(xml, 'userName') || extract(xml, 'UserName');
+  const pass = extract(xml, 'strPassword') || extract(xml, 'password') || extract(xml, 'Password');
+  return { user, pass };
+}
+function envelope(body){
+  return `<?xml version="1.0" encoding="utf-8"?>`+
+         `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">`+
+         `<soap:Body>${body}</soap:Body></soap:Envelope>`;
+}
 
+/* ===== Cola de trabajos (persistida en /tmp) ===== */
+function readJobs(){
+  try{ ensureLogDir(); return JSON.parse(readText(JOBS_FILE)||'[]'); }catch{ return []; }
+}
+function writeJobs(list){ ensureLogDir(); fs.writeFileSync(JOBS_FILE, JSON.stringify(list,null,2)); }
+function enqueue(job){ const L = readJobs(); L.push(job); writeJobs(L); }
+function peekJob(){ const L = readJobs(); return L[0] || null; }
+function popJob(){ const L = readJobs(); const j = L.shift(); writeJobs(L); return j||null; }
+
+/* Generar QBXML según el job */
+function qbxmlFor(job){
+  if (job.type === 'inventoryQuery'){
+    const max = Number(job.max)||10;
+    return `<?xml version="1.0"?><?qbxml version="16.0"?>
+<QBXML>
+  <QBXMLMsgsRq onError="stopOnError">
+    <ItemInventoryQueryRq requestID="1">
+      <MaxReturned>${max}</MaxReturned>
+    </ItemInventoryQueryRq>
+  </QBXMLMsgsRq>
+</QBXML>`;
+  }
+  return '';
+}
+
+/* Parseo simple del ItemInventoryRet (sin libs) */
+function parseInventory(qbxml){
+  const out = [];
+  const blocks = qbxml.match(/<ItemInventoryRet[\s\S]*?<\/ItemInventoryRet>/g) || [];
+  for (const b of blocks){
+    const ListID = extract(b,'ListID');
+    const FullName = extract(b,'FullName');
+    const QuantityOnHand = Number(extract(b,'QuantityOnHand')||0);
+    out.push({ ListID, FullName, QuantityOnHand });
+  }
+  return out;
+}
+
+/* ===== App ===== */
 const app = express();
+app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 
-// Middlewares básicos
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-
-// Importa tu servicio ubicado en ./services/qbwcService.js
-// (si tu archivo se llama distinto, ajusta este require)
-const qbwcService = require(path.join(__dirname, 'services', 'qbwcService'));
-
-// Healthcheck
-app.get('/', (_req, res) => res.status(200).send('OK'));
-
-// ----------------------
-// Rutas de depuración
-// ----------------------
-app.get('/debug/last-response', (_req, res) => {
-  try {
-    const dbg = qbwcService.getDebugInfo();
-    return res.status(200).json({
-      updatedAt: dbg.updatedAt,
-      lastRequestXml: dbg.lastRequestXml,
-      lastResponseXml: dbg.lastResponseXml,
+/* Health & debug */
+app.get('/healthz', (_req,res)=>res.json({ok:true}));
+app.get('/debug/config', (_req,res)=>res.json({
+  user:process.env.WC_USERNAME||null,
+  passLen:(process.env.WC_PASSWORD||'').length,
+  companyFile:process.env.WC_COMPANY_FILE||'none',
+  basePath:BASE_PATH, logDir:LOG_DIR
+}));
+app.get('/debug/where', (_req,res)=>{
+  try{
+    ensureLogDir();
+    const files = fs.readdirSync(LOG_DIR).map(n=>{
+      const st=fs.statSync(fp(n)); return {name:n,size:st.size,mtime:st.mtime};
     });
-  } catch (err) {
-    return res.status(500).json({ error: 'Unable to read last response', details: String(err) });
-  }
+    res.json({logDir:LOG_DIR, files});
+  }catch(e){ res.status(500).send(String(e)); }
 });
 
-app.get('/debug/inventory', (_req, res) => {
-  try {
-    const inv = qbwcService.getInventory();
-    return res.status(200).json(inv);
-  } catch (err) {
-    return res.status(500).json({ error: 'Unable to read inventory', details: String(err) });
-  }
+/* Endpoints de depuración existentes */
+app.get('/debug/last-post-body', (req,res)=>sendFileSmart(res, fp('last-post-body.xml')));
+app.get('/debug/last-auth-request', (req,res)=>sendFileSmart(res, fp('last-auth-request.xml')));
+app.get('/debug/last-auth-response',(req,res)=>sendFileSmart(res, fp('last-auth-response.xml')));
+app.get('/debug/last-auth-cred', (req,res)=>{
+  const p=fp('last-auth-cred.json'); if(!fs.existsSync(p)) return res.status(404).send('no auth cred yet');
+  res.type('application/json').send(fs.readFileSync(p,'utf8'));
 });
 
-// ==========================
-// Servicio SOAP (QBWC)
-// ==========================
-let lastErrorMessage = '';
+/* Nueva cola: ver y sembrar */
+app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
+app.get('/debug/seed-inventory', (req,res)=>{
+  const max = Number(req.query.max)||25;
+  enqueue({ type:'inventoryQuery', max, ts:new Date().toISOString() });
+  res.json({ ok:true, queued:{ type:'inventoryQuery', max }});
+});
+app.get('/debug/inventory', (req,res)=>{
+  sendFileSmart(res, fp('last-inventory.json'));
+});
 
-function authenticateHandler(args) {
-  const user = args?.strUserName || '';
-  const pass = args?.strPassword || '';
+/* WSDL (acepta ?wsdl aunque venga sin valor) */
+app.get(BASE_PATH, (req,res,next)=>{
+  if (!('wsdl' in req.query)) return next();
+  try{
+    const wsdlPath = path.join(__dirname,'wsdl','qbwc.wsdl');
+    const xml = fs.readFileSync(wsdlPath,'utf8');
+    res.type('application/xml').send(xml);
+  }catch(e){ res.status(500).send(String(e)); }
+});
 
-  const confUser = process.env.QBWC_USERNAME;
-  const confPass = process.env.QBWC_PASSWORD;
+/* === Handler SOAP manual (todos los métodos mínimos) === */
+app.post(BASE_PATH, (req,res)=>{
+  let raw=''; req.setEncoding('utf8');
+  req.on('data', c=>{ raw+=c; });
+  req.on('end', ()=>{
+    try{
+      save('last-post-body.xml', raw);
 
-  const acceptAny = !confUser && !confPass;
-  const isValid = acceptAny || (user === confUser && pass === confPass);
+      const is = (tag)=> raw.includes(`<${tag}`) || raw.includes(`<tns:${tag}`);
 
-  if (!isValid) return ['', 'nvu']; // not valid user
+      let bodyXml = '';
 
-  const ticket = randomUUID();
-  const companyFile = ''; // usar el archivo abierto en QBD
-  return [ticket, companyFile];
-}
+      if (is('serverVersion')) {
+        bodyXml = `<serverVersionResponse xmlns="${TNS}"><serverVersionResult>1.0.0-dev</serverVersionResult></serverVersionResponse>`;
+      }
+      else if (is('clientVersion')) {
+        bodyXml = `<clientVersionResponse xmlns="${TNS}"><clientVersionResult></clientVersionResult></clientVersionResponse>`;
+      }
+      else if (is('authenticate')) {
+        save('last-auth-request.xml', raw);
+        const {user,pass} = extractCredsFromXml(raw);
+        const envUser = process.env.WC_USERNAME || '';
+        const envPass = process.env.WC_PASSWORD || '';
+        const ok = (user===envUser && pass===envPass);
 
-function sendRequestXMLHandler() {
-  try {
-    const qbxml = qbwcService.sendRequestXML();
-    return qbxml || '';
-  } catch (err) {
-    lastErrorMessage = `sendRequestXML error: ${String(err)}`;
-    return '';
-  }
-}
+        const passSha = crypto.createHash('sha256').update(pass||'', 'utf8').digest('hex');
+        const envSha  = crypto.createHash('sha256').update(envPass, 'utf8').digest('hex');
+        save('last-auth-cred.json', JSON.stringify({
+          ts:new Date().toISOString(),
+          receivedUser:user, receivedPassLen:(pass||'').length, receivedPassSha256:passSha,
+          envUser, envPassLen:envPass.length, envPassSha256:envSha,
+          matchUser:user===envUser, matchPassHash:passSha===envSha
+        },null,2));
 
-function receiveResponseXMLHandler(args) {
-  try {
-    const response = args?.response || args?.responseXML || '';
-    const percent = qbwcService.receiveResponseXML(response);
-    return Number.isFinite(percent) ? percent : 100;
-  } catch (err) {
-    lastErrorMessage = `receiveResponseXML error: ${String(err)}`;
-    return 100;
-  }
-}
-
-function closeConnectionHandler() {
-  try {
-    return qbwcService.closeConnection() || 'OK';
-  } catch {
-    return 'OK';
-  }
-}
-
-function connectionErrorHandler(args) {
-  const hresult = args?.hresult || '';
-  const message = args?.message || '';
-  lastErrorMessage = `connectionError: hresult=${hresult} message=${message}`;
-  return lastErrorMessage || 'Connection error received';
-}
-
-function getLastErrorHandler() {
-  return lastErrorMessage || '';
-}
-
-const soapService = {
-  QBWebConnectorSvc: {
-    QBWebConnectorSvcSoap: {
-      authenticate(args, cb) {
-        try {
-          const arr = authenticateHandler(args);
-          return cb(null, { authenticateResult: { string: arr } });
-        } catch (err) {
-          lastErrorMessage = `authenticate error: ${String(err)}`;
-          return cb(null, { authenticateResult: { string: ['', 'nvu'] } });
+        const ticket = ok ? (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')) : '';
+        const second = ok ? (process.env.WC_COMPANY_FILE || 'none') : 'nvu'; // 'nvu' -> Not valid user
+        bodyXml = `<authenticateResponse xmlns="${TNS}"><authenticateResult><string>${ticket}</string><string>${second}</string></authenticateResult></authenticateResponse>`;
+        const envlp = envelope(bodyXml);
+        save('last-auth-response.xml', envlp);
+        res.type('text/xml').status(200).send(envlp);
+        return;
+      }
+      else if (is('sendRequestXML')) {
+        // ¿Hay trabajo en cola?
+        let job = peekJob();
+        if (job){
+          // Guardamos como "current" y lo sacamos de la cola
+          fs.writeFileSync(CUR_JOB, JSON.stringify(job));
+          popJob();
+          const qbxml = qbxmlFor(job);
+          save('last-request-qbxml.xml', qbxml);
+          bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;
+        }else{
+          // Cola vacía -> retornar cadena vacía
+          bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult></sendRequestXMLResult></sendRequestXMLResponse>`;
         }
-      },
-      sendRequestXML(args, cb) {
-        const xml = sendRequestXMLHandler(args);
-        return cb(null, { sendRequestXMLResult: xml });
-      },
-      receiveResponseXML(args, cb) {
-        const pct = receiveResponseXMLHandler(args);
-        return cb(null, { receiveResponseXMLResult: pct });
-      },
-      connectionError(args, cb) {
-        const msg = connectionErrorHandler(args);
-        return cb(null, { connectionErrorResult: msg });
-      },
-      getLastError(args, cb) {
-        const msg = getLastErrorHandler(args);
-        return cb(null, { getLastErrorResult: msg });
-      },
-      closeConnection(args, cb) {
-        const msg = closeConnectionHandler(args);
-        return cb(null, { closeConnectionResult: msg });
-      },
-    },
-  },
-};
+      }
+      else if (is('receiveResponseXML')) {
+        const resp = extract(raw, 'response');
+        const now  = Date.now();
+        save(`last-response-${now}.xml`, resp);
+        save('last-response.xml', resp);
 
-// ----------------------
-// WSDL: usa ./wsdl/qbwc.wsdl si existe; si no, embebido
-// ----------------------
-function getEmbeddedWsdl(baseUrl, soapPath) {
-  const addr = `${baseUrl}${soapPath}`;
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<definitions name="QBWebConnectorSvc"
-  targetNamespace="http://developer.intuit.com/"
-  xmlns:tns="http://developer.intuit.com/"
-  xmlns:typens="http://developer.intuit.com/"
-  xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
-  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-  xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+        // Leer job actual para decidir parseo
+        let current = null;
+        try{ current = JSON.parse(readText(CUR_JOB)||'null'); }catch{}
+        if (current && current.type === 'inventoryQuery'){
+          const items = parseInventory(resp);
+          save('last-inventory.json', JSON.stringify({count:items.length, items}, null, 2));
+        }
+        // Limpio current job
+        try{ fs.unlinkSync(CUR_JOB); }catch{}
 
-  <types>
-    <xsd:schema targetNamespace="http://developer.intuit.com/">
-      <xsd:complexType name="ArrayOfString">
-        <xsd:sequence>
-          <xsd:element name="string" type="xsd:string" minOccurs="0" maxOccurs="unbounded"/>
-        </xsd:sequence>
-      </xsd:complexType>
-    </xsd:schema>
-  </types>
+        // 100 => terminado este ciclo
+        bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>100</receiveResponseXMLResult></receiveResponseXMLResponse>`;
+      }
+      else if (is('getLastError')) {
+        bodyXml = `<getLastErrorResponse xmlns="${TNS}"><getLastErrorResult></getLastErrorResult></getLastErrorResponse>`;
+      }
+      else if (is('closeConnection')) {
+        bodyXml = `<closeConnectionResponse xmlns="${TNS}"><closeConnectionResult>OK</closeConnectionResult></closeConnectionResponse>`;
+      }
+      else {
+        const fault = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <soap:Fault>
+      <faultcode>soap:Client</faultcode>
+      <faultstring>Method not implemented in stub</faultstring>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>`;
+        res.type('text/xml').status(200).send(fault);
+        return;
+      }
 
-  <message name="authenticateRequest">
-    <part name="strUserName" type="xsd:string"/>
-    <part name="strPassword" type="xsd:string"/>
-  </message>
-  <message name="authenticateResponse">
-    <part name="authenticateResult" type="typens:ArrayOfString"/>
-  </message>
-
-  <message name="sendRequestXMLRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="strHCPResponse" type="xsd:string"/>
-    <part name="strCompanyFileName" type="xsd:string"/>
-    <part name="qbXMLCountry" type="xsd:string"/>
-    <part name="qbXMLMajorVers" type="xsd:int"/>
-    <part name="qbXMLMinorVers" type="xsd:int"/>
-  </message>
-  <message name="sendRequestXMLResponse">
-    <part name="sendRequestXMLResult" type="xsd:string"/>
-  </message>
-
-  <message name="receiveResponseXMLRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="response" type="xsd:string"/>
-    <part name="hresult" type="xsd:string"/>
-    <part name="message" type="xsd:string"/>
-  </message>
-  <message name="receiveResponseXMLResponse">
-    <part name="receiveResponseXMLResult" type="xsd:int"/>
-  </message>
-
-  <message name="connectionErrorRequest">
-    <part name="ticket" type="xsd:string"/>
-    <part name="hresult" type="xsd:string"/>
-    <part name="message" type="xsd:string"/>
-  </message>
-  <message name="connectionErrorResponse">
-    <part name="connectionErrorResult" type="xsd:string"/>
-  </message>
-
-  <message name="getLastErrorRequest">
-    <part name="ticket" type="xsd:string"/>
-  </message>
-  <message name="getLastErrorResponse">
-    <part name="getLastErrorResult" type="xsd:string"/>
-  </message>
-
-  <message name="closeConnectionRequest">
-    <part name="ticket" type="xsd:string"/>
-  </message>
-  <message name="closeConnectionResponse">
-    <part name="closeConnectionResult" type="xsd:string"/>
-  </message>
-
-  <portType name="QBWebConnectorSvcSoap">
-    <operation name="authenticate">
-      <input message="tns:authenticateRequest"/>
-      <output message="tns:authenticateResponse"/>
-    </operation>
-    <operation name="sendRequestXML">
-      <input message="tns:sendRequestXMLRequest"/>
-      <output message="tns:sendRequestXMLResponse"/>
-    </operation>
-    <operation name="receiveResponseXML">
-      <input message="tns:receiveResponseXMLRequest"/>
-      <output message="tns:receiveResponseXMLResponse"/>
-    </operation>
-    <operation name="connectionError">
-      <input message="tns:connectionErrorRequest"/>
-      <output message="tns:connectionErrorResponse"/>
-    </operation>
-    <operation name="getLastError">
-      <input message="tns:getLastErrorRequest"/>
-      <output message="tns:getLastErrorResponse"/>
-    </operation>
-    <operation name="closeConnection">
-      <input message="tns:closeConnectionRequest"/>
-      <output message="tns:closeConnectionResponse"/>
-    </operation>
-  </portType>
-
-  <binding name="QBWebConnectorSvcSoap" type="tns:QBWebConnectorSvcSoap">
-    <soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
-    <operation name="authenticate">
-      <soap:operation soapAction="http://developer.intuit.com/authenticate"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="sendRequestXML">
-      <soap:operation soapAction="http://developer.intuit.com/sendRequestXML"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="receiveResponseXML">
-      <soap:operation soapAction="http://developer.intuit.com/receiveResponseXML"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="connectionError">
-      <soap:operation soapAction="http://developer.intuit.com/connectionError"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="getLastError">
-      <soap:operation soapAction="http://developer.intuit.com/getLastError"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-    <operation name="closeConnection">
-      <soap:operation soapAction="http://developer.intuit.com/closeConnection"/>
-      <input><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
-      <output><soap:body use="encoded" namespace="http://developer.intuit.com/" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
-    </operation>
-  </binding>
-
-  <service name="QBWebConnectorSvc">
-    <port name="QBWebConnectorSvcSoap" binding="tns:QBWebConnectorSvcSoap">
-      <soap:address location="${addr}"/>
-    </port>
-  </service>
-</definitions>`;
-}
-
-function loadWsdl() {
-  const localWsdlPath = path.join(__dirname, 'wsdl', 'qbwc.wsdl');
-  try {
-    if (fs.existsSync(localWsdlPath)) {
-      return fs.readFileSync(localWsdlPath, 'utf8');
+      const envlp = envelope(bodyXml);
+      res.type('text/xml').status(200).send(envlp);
+    }catch(e){
+      res.status(500).type('text/plain').send(String(e));
     }
-  } catch (_) {}
-  return getEmbeddedWsdl(PUBLIC_URL, SOAP_PATH);
-}
-
-// ----------------------
-// Levantar HTTP + SOAP
-// ----------------------
-const server = http.createServer(app);
-const wsdlXml = loadWsdl();
-
-// Monta listener SOAP (sirve WSDL en /qbwc?wsdl)
-soap.listen(server, SOAP_PATH, soapService, wsdlXml);
-
-server.listen(PORT, HOST, () => {
-  console.log(`[server] Listening on http://${HOST}:${PORT}`);
-  console.log(`[soap] WSDL at ${PUBLIC_URL}${SOAP_PATH}?wsdl`);
-  console.log(`[debug] GET /debug/inventory | /debug/last-response`);
+  });
 });
+
+/* Start */
+app.listen(PORT, ()=> console.log(`[QBWC] Listening http://localhost:${PORT}${BASE_PATH}`));
