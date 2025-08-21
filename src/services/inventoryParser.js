@@ -1,22 +1,8 @@
 // services/inventoryParser.js
-// Parser liviano SIN dependencias para convertir el QBXML de /debug/last-response a un JSON de inventario.
-// Mantiene cambios mínimos y cero riesgo sobre autenticación o flujo del WC.
+// Parser robusto SIN dependencias para convertir el QBXML (aunque venga escapado)
+// en un JSON de inventario. No toca autenticación ni el flujo con QBWC.
 
-function textBetween(tag, block) {
-  const re = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i');
-  const m = block.match(re);
-  return m ? m[1].trim() : undefined;
-}
-
-function getBlocks(xml, tag) {
-  const re = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'gi');
-  const out = [];
-  let m;
-  while ((m = re.exec(xml)) !== null) out.push(m[1]);
-  return out;
-}
-
-// Decodifica unas entidades básicas comunes en QBXML para que el JSON sea legible.
+// -------- utils --------
 function decodeEntities(str) {
   if (!str) return str;
   return str
@@ -31,37 +17,86 @@ function decodeEntities(str) {
     .replace(/&#134;/g, '†');
 }
 
+// Toma bloques <ItemInventoryRet>...</ItemInventoryRet> (con o sin prefijo de namespace)
+function getBlocks(xml, baseTag /* "ItemInventoryRet" */) {
+  const re = new RegExp(
+    `<\\s*(?:\\w+:)?${baseTag}\\b[\\s\\S]*?<\\/\\s*(?:\\w+:)?${baseTag}\\s*>`,
+    'gi'
+  );
+  const out = [];
+  let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[0]);
+  return out;
+}
+
+// Extrae el contenido de un tag (tolera prefijo de namespace)
+function pick(block, tag) {
+  const re = new RegExp(
+    `<\\s*(?:\\w+:)?${tag}\\s*>\\s*([\\s\\S]*?)\\s*<\\/\\s*(?:\\w+:)?${tag}\\s*>`,
+    'i'
+  );
+  const m = block.match(re);
+  return m ? m[1].trim() : undefined;
+}
+
+const toNum  = (v) => (v === '' || v == null ? undefined : Number(v));
+const cleanUndef = (obj) => {
+  Object.keys(obj).forEach((k) => obj[k] === undefined && delete obj[k]);
+  return obj;
+};
+
+// -------- main --------
 /**
- * Recibe el QBXML completo (string) y devuelve { count, items[] }
- * Campos comunes expuestos: ListID, Name, FullName, BarCodeValue, QuantityOnHand, AverageCost,
- * QuantityOnOrder, QuantityOnSalesOrder, TimeCreated, TimeModified, SalesDesc, PurchaseDesc
+ * Recibe el QBXML (string) y devuelve { count, items[] }.
+ * Maneja XML escapado (&lt;...&gt;) y prefijos de namespace.
  */
-function parseInventoryFromQBXML(xml) {
-  if (typeof xml !== 'string' || !xml.includes('<ItemInventoryQueryRs')) {
+function parseInventoryFromQBXML(xmlInput) {
+  if (typeof xmlInput !== 'string' || !xmlInput.length) {
     return { count: 0, items: [] };
   }
 
-  // Extrae todos los bloques de <ItemInventoryRet> ... </ItemInventoryRet>
-  const itemBlocks = getBlocks(xml, 'ItemInventoryRet');
-  const items = itemBlocks.map(block => {
+  // Si viene escapado (&lt;QBXML&gt;), lo desescapamos primero
+  let xml = xmlInput;
+  if (xml.includes('&lt;QBXML') || xml.includes('&lt;ItemInventory')) {
+    xml = decodeEntities(xml);
+  }
+
+  // Si no hay señal de respuesta de inventario, devolvemos vacío
+  if (!/<\s*(?:\w+:)?ItemInventory(Query)?Rs\b/i.test(xml)) {
+    return { count: 0, items: [] };
+  }
+
+  // Extrae todos los <ItemInventoryRet>
+  const blocks = getBlocks(xml, 'ItemInventoryRet');
+  if (!blocks.length) return { count: 0, items: [] };
+
+  const items = blocks.map((b) => {
+    const Name        = pick(b, 'Name');
+    const FullName    = pick(b, 'FullName');
+    const BarCode     = pick(b, 'BarCodeValue') || pick(b, 'ManufacturerPartNumber');
+    const SalesDesc   = pick(b, 'SalesDesc');
+    const PurchaseDesc= pick(b, 'PurchaseDesc');
+
     const obj = {
-      ListID: textBetween('ListID', block),
-      TimeCreated: textBetween('TimeCreated', block),
-      TimeModified: textBetween('TimeModified', block),
-      EditSequence: textBetween('EditSequence', block),
-      Name: decodeEntities(textBetween('Name', block)),
-      FullName: decodeEntities(textBetween('FullName', block)),
-      BarCodeValue: decodeEntities(textBetween('BarCodeValue', block) || textBetween('ManufacturerPartNumber', block)),
-      QuantityOnHand: textBetween('QuantityOnHand', block) ? Number(textBetween('QuantityOnHand', block)) : undefined,
-      AverageCost: textBetween('AverageCost', block) ? Number(textBetween('AverageCost', block)) : undefined,
-      QuantityOnOrder: textBetween('QuantityOnOrder', block) ? Number(textBetween('QuantityOnOrder', block)) : undefined,
-      QuantityOnSalesOrder: textBetween('QuantityOnSalesOrder', block) ? Number(textBetween('QuantityOnSalesOrder', block)) : undefined,
-      SalesDesc: decodeEntities(textBetween('SalesDesc', block)),
-      PurchaseDesc: decodeEntities(textBetween('PurchaseDesc', block)),
+      ListID: pick(b, 'ListID'),
+      TimeCreated: pick(b, 'TimeCreated'),
+      TimeModified: pick(b, 'TimeModified'),
+      EditSequence: pick(b, 'EditSequence'),
+
+      Name: Name ? decodeEntities(Name) : undefined,
+      FullName: FullName ? decodeEntities(FullName) : undefined,
+      BarCodeValue: BarCode ? decodeEntities(BarCode) : undefined,
+
+      QuantityOnHand: toNum(pick(b, 'QuantityOnHand')),
+      AverageCost: toNum(pick(b, 'AverageCost')),
+      QuantityOnOrder: toNum(pick(b, 'QuantityOnOrder')),
+      QuantityOnSalesOrder: toNum(pick(b, 'QuantityOnSalesOrder')),
+
+      SalesDesc: SalesDesc ? decodeEntities(SalesDesc) : undefined,
+      PurchaseDesc: PurchaseDesc ? decodeEntities(PurchaseDesc) : undefined,
     };
-    // Limpia undefined para que la salida sea prolija
-    Object.keys(obj).forEach(k => obj[k] === undefined && delete obj[k]);
-    return obj;
+
+    return cleanUndef(obj);
   });
 
   return { count: items.length, items };
