@@ -1,0 +1,133 @@
+// src/routes/shopify.webhooks.js
+const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { getInventoryItemSku } = require('../services/shopify.client');
+const { resolveSkuToItem } = require('../services/sku-map');
+
+const router = express.Router();
+
+// === cola (mismo archivo que usa el server) ===
+const TMP_DIR = '/tmp';
+const QUEUE_PATH = path.join(TMP_DIR, 'jobs-queue.json');
+function readJobs() { try { return JSON.parse(fs.readFileSync(QUEUE_PATH, 'utf8')) || []; } catch { return []; } }
+function writeJobs(a){ fs.writeFileSync(QUEUE_PATH, JSON.stringify(a||[], null, 2), 'utf8'); }
+function enqueue(job) { const q=readJobs(); q.push(job); writeJobs(q); return q.length; }
+
+// === snapshot de QBD para conocer QOH (QuantityOnHand)
+const INV_PATH = path.join(TMP_DIR, 'last-inventory.json');
+function loadInventory() { try { return JSON.parse(fs.readFileSync(INV_PATH,'utf8')) || {items:[]}; } catch { return {items:[]}; } }
+function skuFields() {
+  const env = process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name';
+  return env.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+// --- verificación HMAC ---
+function verifyHmac(secret, rawBody, hmacHeader) {
+  if (!secret) return true; // si no hay secreto, no bloquear en dev
+  const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(hmacHeader || '', 'utf8'));
+}
+const rawJson = express.raw({ type: 'application/json' });
+
+// ============================
+//  A) pedidos pagados (venta)
+// ============================
+// topic: orders/paid   (también puedes apuntar orders/create si prefieres)
+router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
+  try {
+    if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
+      return res.status(401).send('Invalid HMAC');
+
+    const payload = JSON.parse(req.body.toString('utf8'));
+    const linesIn = Array.isArray(payload.line_items) ? payload.line_items : [];
+    if (!linesIn.length) return res.status(200).send('ok');
+
+    const inv = loadInventory();
+    const fieldsPriority = skuFields();
+
+    const lines = [];
+    const notFound = [];
+
+    for (const li of linesIn) {
+      const sku = String(li.sku || '').trim();
+      const qty = Math.abs(Number(li.quantity || 0));
+      if (!sku || !qty) continue;
+
+      const it = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
+      if (!it) { notFound.push(sku); continue; }
+
+      const delta = -qty; // venta descuenta
+      const line = it.ListID
+        ? { ListID: it.ListID, QuantityDifference: delta }
+        : { FullName: it.FullName || it.Name, QuantityDifference: delta };
+      lines.push(line);
+    }
+
+    if (lines.length) {
+      enqueue({
+        type: 'inventoryAdjust',
+        lines,
+        account: process.env.QBD_ADJUST_ACCOUNT || undefined,
+        source: 'shopify-order',
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    return res.status(200).json({ ok: true, queuedLines: lines.length, notFound });
+  } catch (e) {
+    console.error('orders/paid webhook error:', e);
+    return res.status(500).send('error');
+  }
+});
+
+// ===================================================
+//  B) inventory_levels/update (ajustes manuales/restock)
+// ===================================================
+router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
+  try {
+    if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
+      return res.status(401).send('Invalid HMAC');
+
+    const payload = JSON.parse(req.body.toString('utf8'));
+    const invItemId = payload?.inventory_item_id;
+    const available = Number(payload?.available);
+
+    if (!invItemId || Number.isNaN(available)) return res.status(200).send('ok');
+
+    // 1) obtener SKU desde inventory_item_id
+    const sku = await getInventoryItemSku(invItemId).catch(()=>null);
+    if (!sku) return res.status(200).send('ok');
+
+    // 2) buscar item QBD por SKU (prioridades + overrides)
+    const inv = loadInventory();
+    const fieldsPriority = skuFields();
+    const it = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
+    if (!it) return res.status(200).send('ok');
+
+    // 3) calcular delta con respecto a QBD (snapshot)
+    const qbdQoh = Number(it.QuantityOnHand || 0);
+    const delta = available - qbdQoh;
+    if (!delta) return res.status(200).send('ok');
+
+    const line = it.ListID
+      ? { ListID: it.ListID, QuantityDifference: delta }
+      : { FullName: it.FullName || it.Name, QuantityDifference: delta };
+
+    enqueue({
+      type: 'inventoryAdjust',
+      lines: [line],
+      account: process.env.QBD_ADJUST_ACCOUNT || undefined,
+      source: 'shopify-inventory-level',
+      createdAt: new Date().toISOString(),
+    });
+
+    return res.status(200).json({ ok: true, sku, qbdQoh, available, delta });
+  } catch (e) {
+    console.error('inventory_levels/update webhook error:', e);
+    return res.status(500).send('error');
+  }
+});
+
+module.exports = router;

@@ -61,6 +61,11 @@ function qbxmlFor(job) {
     return buildInventoryQueryXML(max, process.env.QBXML_VER || '13.0');
   }
 
+   if (job.type === 'inventoryAdjust') {
+    const ver = process.env.QBXML_VER || '16.0';
+    return buildInventoryAdjustmentXML(job.lines || [], job.account, ver);
+  }
+
   // Mantén aquí tus otros tipos de job si los tienes
   return '';
 }
@@ -84,6 +89,10 @@ const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 
 app.use('/debug', require('./routes/debug.inventory'));
+app.use('/shopify', require('./routes/shopify.webhooks'));
+app.use('/sync', require('./routes/sync.qbd-to-shopify'));
+app.use('/shopify', require('./routes/shopify.admin'));
+
 
 /* Health & debug */
 app.get('/healthz', (_req,res)=>res.json({ok:true}));
@@ -163,6 +172,10 @@ app.post(BASE_PATH, (req,res)=>{
         if (ok && process.env.AUTO_SEED_ON_AUTH === 'true') {
           enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 50), ts: new Date().toISOString() });
         }
+        if (process.env.AUTO_ENQUEUE_INVENTORY_QUERY === 'true') {
+          enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 100), ts: new Date().toISOString() });
+        }
+
 
 
         const passSha = crypto.createHash('sha256').update(pass||'', 'utf8').digest('hex');
@@ -206,9 +219,28 @@ app.post(BASE_PATH, (req,res)=>{
         // Leer job actual para decidir parseo
         let current = null;
         try{ current = JSON.parse(readText(CUR_JOB)||'null'); }catch{}
-        if (current && current.type === 'inventoryQuery'){
-          const items = parseInventory(resp);
-          save('last-inventory.json', JSON.stringify({count:items.length, items}, null, 2));
+        // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
+        if (current && current.type === 'inventoryQuery') {
+          const items = parseInventory(resp); // o tu parseInventoryFromQBXML si ya lo usas
+          save('last-inventory.json', JSON.stringify({ count: items.length, items }, null, 2));
+
+          // --- Auto push a Shopify (después de persistir el snapshot) ---
+          try {
+            const shouldAuto = String(process.env.SHOPIFY_AUTO_PUSH || '').toLowerCase() === 'true';
+
+            // (opcional) Solo si la respuesta fue exitosa
+            const m = resp.match(/<ItemInventoryQueryRs[^>]*statusCode="(\d+)"/i);
+            const ok = !m || m[1] === '0';
+
+            if (shouldAuto && ok) {
+              const { apply } = require('./services/shopify.sync');
+              setImmediate(() =>
+                apply().catch(e => console.error('Shopify apply error:', e))
+              );
+            }
+          } catch (e) {
+            console.error('Auto-push init error:', e);
+          }
         }
         // Limpio current job
         try{ fs.unlinkSync(CUR_JOB); }catch{}
