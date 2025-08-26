@@ -14,6 +14,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     permissions:
       contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,42 +40,24 @@ jobs:
           npm run build --if-present
 
           if (-not (Test-Path "node_modules\express")) {
-            Write-Warning "No se encontró 'express' en node_modules. Verifica dependencies."
+            Write-Warning "No se encontró 'express' en node_modules. Verifica que esté en 'dependencies'."
           }
 
-      - name: Prepare deploy folder (robocopy handles long paths)
+      - name: Create ZIP from repo root (tar)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          Remove-Item -Recurse -Force deploy -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path deploy | Out-Null
-          Copy-Item package.json -Destination deploy
-          if (Test-Path package-lock.json) { Copy-Item package-lock.json -Destination deploy }
-
-          # Código (ajusta si usas otra estructura)
-          if (Test-Path dist) { robocopy dist deploy\dist /MIR | Out-Null }
-          if (Test-Path src)  { robocopy src  deploy\src  /MIR | Out-Null }
-          if (Test-Path index.js)  { Copy-Item index.js  -Destination deploy }
-          if (Test-Path server.js) { Copy-Item server.js -Destination deploy }
-          if (Test-Path web.config) { Copy-Item web.config -Destination deploy }
-
-          # Dependencias de runtime (robocopy devuelve códigos 0-7 como éxito)
-          if (-not (Test-Path node_modules)) { Throw "No existe node_modules (¿falló npm install/ci?)." }
-          robocopy node_modules deploy\node_modules /MIR /MT:16 /R:1 /W:1
-          $rc=$LASTEXITCODE; if ($rc -ge 8) { Throw "robocopy falló con código $rc" }
-
-      - name: Create ZIP with tar (better for node_modules)
-        shell: powershell
-        run: |
           if (Test-Path app.zip) { Remove-Item app.zip -Force }
-          tar -a -cf app.zip -C deploy .
+
+          # Empaqueta TODO el repo (incluye node_modules) excluyendo lo innecesario
+          tar -a -cf app.zip --exclude=.git --exclude=.github --exclude=app.zip .
 
       - name: Sanity check ZIP (express present)
         shell: powershell
         run: |
           $list = tar -tf app.zip
           if ($list -notmatch "node_modules/express/package.json") {
-            Throw "El ZIP no contiene node_modules/express. Abortando para evitar un deploy roto."
+            Write-Error "El ZIP no contiene node_modules/express. Abortando para evitar un deploy roto."
           }
 
       - name: Upload artifact
@@ -91,6 +74,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: node-app-zip
+
       - name: Deploy to STAGING
         uses: azure/webapps-deploy@v3
         with:
@@ -106,9 +90,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: node-app-zip
+
       - name: Deploy to PRODUCTION
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'qbd-shopify-sincronization'
           package: app.zip
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}s
