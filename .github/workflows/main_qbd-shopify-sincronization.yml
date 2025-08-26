@@ -1,5 +1,5 @@
-# Docs: https://github.com/Azure/webapps-deploy
 # Runner: self-hosted Windows x64
+# Deploy ZIP con node_modules incluido (sin prune)
 
 name: Build & Deploy — Staging + Prod (ZIP)
 
@@ -30,18 +30,35 @@ jobs:
       - name: Install & Build
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           npm ci
           npm run build --if-present
-          # Deja sólo dependencias de producción
-          npm prune --omit=dev
+          # 👇 Verificación defensiva: asegúrate de que Express exista
+          if (-not (Test-Path "node_modules\express")) {
+            Write-Error "Falta express en node_modules. Asegúrate de que esté en 'dependencies' y no en 'devDependencies'."
+          }
 
       - name: Package ZIP (prod bundle)
         shell: powershell
         run: |
-          # Prepara carpeta 'deploy' con todo menos .git/.github y archivos temporales
+          $ErrorActionPreference = 'Stop'
           Remove-Item -Recurse -Force deploy -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path deploy | Out-Null
-          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git', '.github', 'deploy', 'app.zip') } | Copy-Item -Recurse -Destination deploy
+
+          # Archivos imprescindibles
+          Copy-Item package.json, package-lock.json -Destination deploy
+
+          # Código de la app (ajusta según tu estructura)
+          if (Test-Path dist) { Copy-Item -Recurse dist -Destination deploy }
+          if (Test-Path src)  { Copy-Item -Recurse src  -Destination deploy }
+          if (Test-Path index.js) { Copy-Item index.js -Destination deploy }
+          if (Test-Path server.js) { Copy-Item server.js -Destination deploy }
+          if (Test-Path web.config) { Copy-Item web.config -Destination deploy }
+
+          # Dependencias de runtime
+          if (-not (Test-Path node_modules)) { Write-Error "No existe node_modules. ¿Falló npm ci?" }
+          Copy-Item -Recurse node_modules -Destination deploy
+
           Compress-Archive -Path deploy\* -DestinationPath app.zip -Force
 
       - name: Upload artifact
