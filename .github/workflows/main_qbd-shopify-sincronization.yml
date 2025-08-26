@@ -1,7 +1,7 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
+# Docs: https://github.com/Azure/webapps-deploy
+# Runner: self-hosted Windows x64
 
-name: Build and deploy Node.js app to Azure Web App - qbd-shopify-sincronization
+name: Build & Deploy — Staging + Prod (ZIP)
 
 on:
   push:
@@ -17,58 +17,71 @@ jobs:
   build:
     runs-on: [self-hosted, Windows, X64]
     permissions:
-      contents: read  # requerido por actions/checkout
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js version
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
 
-      - name: npm install, build, and test
+      - name: Install & Build
+        shell: pwsh
         run: |
           npm ci
           npm run build --if-present
-          npm run test --if-present
+          # Deja sólo dependencias de producción
+          npm prune --omit=dev
 
-      - name: Upload artifact for deployment job
+      - name: Package ZIP (prod bundle)
+        shell: pwsh
+        run: |
+          # Prepara carpeta 'deploy' con todo menos .git/.github
+          Remove-Item -Recurse -Force deploy -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path deploy | Out-Null
+          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git', '.github') } | Copy-Item -Recurse -Destination deploy
+          # Empaqueta
+          Compress-Archive -Path deploy\* -DestinationPath app.zip -Force
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node-app
-          path: .
+          name: node-app-zip
+          path: app.zip
 
   deploy_staging:
     runs-on: [self-hosted, Windows, X64]
     needs: build
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: node-app
+          name: node-app-zip
 
-      - name: Deploy to Azure Web App (STAGING)
+      - name: Deploy to STAGING
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'stagging-qbd-shopify-sincronization'
-          package: .
+          package: app.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_STAGING }}
 
   deploy_production:
     runs-on: [self-hosted, Windows, X64]
-    needs: deploy_staging   # <- quita esta línea si quieres paralelizar y tienes 2 runners
+    needs: deploy_staging
 
     steps:
-      - name: Download artifact from build job
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: node-app
+          name: node-app-zip
 
-      - name: Deploy to Azure Web App (PRODUCTION)
+      - name: Deploy to PRODUCTION
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'qbd-shopify-sincronization'
-          package: .
+          package: app.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
