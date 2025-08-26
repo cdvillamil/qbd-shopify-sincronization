@@ -1,4 +1,4 @@
-name: Build & Deploy — Staging + Prod (ZIP)
+name: Build & Deploy — Staging + Prod (Source → Oryx build)
 
 on:
   push:
@@ -10,72 +10,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  package_source:
     runs-on: [self-hosted, Windows, X64]
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20.x'
-
-      - name: Install & Build
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          if (Test-Path "package-lock.json") {
-            Write-Host "🧰 package-lock.json encontrado → npm ci"
-            npm ci
-          } else {
-            Write-Host "⚠️  Sin package-lock.json → npm install"
-            npm install --no-audit --no-fund
-          }
-
-          npm run build --if-present
-
-          if (-not (Test-Path "node_modules\express")) {
-            Write-Warning "No se encontró 'express' en node_modules. Verifica que esté en 'dependencies'."
-          }
-
-      - name: Create ZIP from repo root (tar)
+      # Crea un ZIP solo con archivos versionados (sin node_modules)
+      - name: Create source ZIP (git archive)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           if (Test-Path app.zip) { Remove-Item app.zip -Force }
+          git archive -o app.zip HEAD
 
-          # Empaqueta TODO el repo (incluye node_modules) excluyendo lo innecesario
-          tar -a -cf app.zip --exclude=.git --exclude=.github --exclude=app.zip .
-
-      - name: Sanity check ZIP (express present)
-        shell: powershell
-        run: |
-          $list = tar -tf app.zip
-          if ($list -notmatch "node_modules/express/package.json") {
-            Write-Error "El ZIP no contiene node_modules/express. Abortando para evitar un deploy roto."
-          }
+          # Verificaciones rápidas
+          if (-not (Test-Path "package.json")) { Write-Error "No existe package.json en el repo." }
+          # Opcional: asegurar que subiste el lockfile para builds deterministas
+          if (-not (Test-Path "package-lock.json")) { Write-Warning "No hay package-lock.json committeado. Azure hará 'npm install' en vez de 'npm ci'." }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node-app-zip
+          name: source-zip
           path: app.zip
 
   deploy_staging:
     runs-on: [self-hosted, Windows, X64]
-    needs: build
+    needs: package_source
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: node-app-zip
-
-      - name: Deploy to STAGING
+          name: source-zip
+      - name: Deploy to STAGING (source, remote build)
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'stagging-qbd-shopify-sincronization'
@@ -89,11 +57,10 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: node-app-zip
-
-      - name: Deploy to PRODUCTION
+          name: source-zip
+      - name: Deploy to PRODUCTION (source, remote build)
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'qbd-shopify-sincronization'
           package: app.zip
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}s
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PROD }}
