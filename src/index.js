@@ -133,6 +133,11 @@ app.get('/debug/inventory', (req,res)=>{
   sendFileSmart(res, fp('last-inventory.json'));
 });
 
+app.get('/qbwc', (req, res) => {
+  res.status(200).type('text/plain').send('QBWC endpoint OK');
+});
+
+
 /* WSDL (acepta ?wsdl aunque venga sin valor) */
 app.get(BASE_PATH, (req,res,next)=>{
   if (!('wsdl' in req.query)) return next();
