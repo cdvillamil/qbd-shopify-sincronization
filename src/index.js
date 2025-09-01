@@ -192,13 +192,34 @@ app.post(BASE_PATH, (req,res)=>{
           matchUser:user===envUser, matchPassHash:passSha===envSha
         },null,2));
 
-        const ticket = ok ? (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')) : '';
-        const second = ok ? (process.env.WC_COMPANY_FILE || 'none') : 'nvu'; // 'nvu' -> Not valid user
-        bodyXml = `<authenticateResponse xmlns="${TNS}"><authenticateResult><string>${ticket}</string><string>${second}</string></authenticateResult></authenticateResponse>`;
+        // Ticket para esta sesión
+        const ticket = ok
+          ? (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'))
+          : '';
+
+        // ⬇️ Archivo de compañía:
+        //  - Si WC_COMPANY_FILE está vacío / no definido ⇒ ''  (usar el archivo YA ABIERTO en QuickBooks)
+        //  - Si prefieres forzar ruta, define WC_COMPANY_FILE con la ruta EXACTA en la VM.
+        let companyFile = '';
+        if (ok) {
+          const envPath = (process.env.WC_COMPANY_FILE || '').trim();
+          companyFile = envPath; // dejar '' para usar el archivo abierto
+        }
+        console.log('authenticate companyFile =>', companyFile || '(use currently open company)');
+
+        bodyXml =
+          `<authenticateResponse xmlns="${TNS}">` +
+            `<authenticateResult>` +
+              `<string>${ticket}</string>` +
+              `<string>${companyFile}</string>` +
+            `</authenticateResult>` +
+          `</authenticateResponse>`;
+
         const envlp = envelope(bodyXml);
         save('last-auth-response.xml', envlp);
         res.type('text/xml').status(200).send(envlp);
         return;
+
       }
       else if (is('sendRequestXML')) {
         // ¿Hay trabajo en cola?
@@ -259,6 +280,13 @@ app.post(BASE_PATH, (req,res)=>{
       else if (is('closeConnection')) {
         bodyXml = `<closeConnectionResponse xmlns="${TNS}"><closeConnectionResult>OK</closeConnectionResult></closeConnectionResponse>`;
       }
+      else if (is('connectionError')) {
+        const hresult = extract(raw, 'hresult') || '';
+        const message = extract(raw, 'message') || '';
+        console.error('WC connectionError:', hresult, message);
+        bodyXml = `<connectionErrorResponse xmlns="${TNS}"><connectionErrorResult>DONE</connectionErrorResult></connectionErrorResponse>`;
+      }
+
       else {
         const fault = `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
