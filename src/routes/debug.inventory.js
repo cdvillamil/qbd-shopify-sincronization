@@ -12,14 +12,36 @@ const LAST_RESP = path.join(TMP_DIR, 'last-response.xml');
 function read(file) {
   try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
 }
+
+// Normaliza XML que llega HTML-escapado (&lt; ... &gt;) y remueve BOM
+function normalizeXml(xml) {
+  if (!xml) return '';
+  // quitar BOM si existe
+  if (xml.charCodeAt(0) === 0xFEFF) xml = xml.slice(1);
+  // si parece HTML-escapado, desescapar
+  if (xml.includes('&lt;') && xml.includes('&gt;')) {
+    xml = xml
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/&amp;/g, '&');
+  }
+  return xml;
+}
+
 function extract(block, tag) {
   const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
   if (!m) return '';
+  // ya viene normalizado; mantenemos solo &amp; -> &
   return m[1].replace(/&amp;/g, '&').trim();
 }
+
 function parseInventory(xml) {
+  xml = normalizeXml(xml);
   if (!xml) return [];
-  // Soportamos ItemInventoryRet (clásico). Si usas otros Rq/Rs, agrega aquí.
+
+  // Soportamos ItemInventoryRet (puedes añadir otros tipos si usas más queries)
   const blocks = xml.match(/<ItemInventoryRet\b[\s\S]*?<\/ItemInventoryRet>/gi) || [];
   const items = [];
   for (const b of blocks) {
@@ -36,7 +58,6 @@ function parseInventory(xml) {
 
 // Devuelve el último XML en /tmp que contenga inventario
 function pickLatestInventoryXml() {
-  // 1) intenta variantes timestamped (si existen)
   let files = [];
   try {
     files = fs.readdirSync(TMP_DIR)
@@ -48,22 +69,22 @@ function pickLatestInventoryXml() {
   } catch { /* ignore */ }
 
   for (const f of files) {
-    const xml = read(f);
+    const xml = normalizeXml(read(f));
     if (/<ItemInventoryRet\b/i.test(xml)) {
       const items = parseInventory(xml);
       if (items.length > 0) return { file: f, xml, items };
     }
   }
 
-  // 2) fallback: last-response.xml si (y solo si) tiene inventario
-  const xml = read(LAST_RESP);
+  // fallback: last-response.xml si (y solo si) tiene inventario
+  let xml = normalizeXml(read(LAST_RESP));
   if (/<ItemInventoryRet\b/i.test(xml)) {
     const items = parseInventory(xml);
     if (items.length > 0) return { file: LAST_RESP, xml, items };
   }
 
   // Nada válido encontrado
-  return { file: LAST_RESP, xml: read(LAST_RESP), items: [] };
+  return { file: LAST_RESP, xml: normalizeXml(read(LAST_RESP)), items: [] };
 }
 
 // ---------- routes ----------
@@ -80,7 +101,8 @@ router.get('/scan-xml', (_req, res) => {
       });
 
     out = files.map(f => {
-      const xml = read(f);
+      const xmlRaw = read(f);
+      const xml = normalizeXml(xmlRaw);
       const hasInv = /<ItemInventoryRet\b/i.test(xml);
       const count = hasInv ? (xml.match(/<ItemInventoryRet\b/gi) || []).length : 0;
       return { file: f, hasInventory: hasInv, count };
@@ -93,7 +115,6 @@ router.get('/scan-xml', (_req, res) => {
 
 // GET /debug/inventory?persist=1&name=...&sku=...
 router.get('/inventory', (req, res) => {
-  // Tomamos automáticamente el último XML válido con inventario
   const picked = pickLatestInventoryXml();
   let items = picked.items;
 
