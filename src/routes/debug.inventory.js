@@ -1,82 +1,91 @@
 // routes/debug.inventory.js
-// Expone GET /debug/inventory leyendo el MISMO XML que devuelve /debug/last-response.
-// No toca autenticación ni el flujo con QBWC.
-// Implementado como "self-call" a tu propio endpoint /debug/last-response para evitar
-// depender de rutas internas, variables globales o path en disco.
-
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
-const { parseInventoryFromQBXML } = require('../services/inventoryParser');
-
 const router = express.Router();
 
-// Helper para obtener el XML actual desde tu propio endpoint /debug/last-response
-async function fetchLastResponseXML(req) {
-  // Usa el host actual para no quemar dominios/puertos
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
-  const url = `${baseUrl}/debug/last-response`;
+const TMP_DIR = '/tmp';
+const SNAP_PATH = path.join(TMP_DIR, 'last-inventory.json');
+const LAST_RESP = path.join(TMP_DIR, 'last-response.xml');
 
-  // Node 18+ trae fetch global. Si usas Node <18, cambia por axios(request) si ya lo tienes.
-  const res = await fetch(url, { method: 'GET' });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`No se pudo leer /debug/last-response (${res.status}) ${text}`);
-  }
-
-  // Dos posibilidades:
-  // 1) Respuesta es { xml: "..." }
-  // 2) Respuesta es texto XML plano
-  const contentType = res.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const json = await res.json();
-    return typeof json.xml === 'string' ? json.xml : JSON.stringify(json);
-  }
-  return await res.text();
+function read(file) {
+  try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
 }
 
-// GET /debug/inventory
-router.get('/inventory', async (req, res) => {
-  try {
-    const xml = await fetchLastResponseXML(req);
+function extract(block, tag) {
+  const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
+  if (!m) return '';
+  return m[1].replace(/&amp;/g, '&').trim();
+}
 
-    const parsed = parseInventoryFromQBXML(xml);
-
-    // Opcional: filtros rápidos por query string (no rompen nada)
-    // /debug/inventory?name=AXDI-VW1
-    const { name, sku, qmin, qmax } = req.query;
-    let items = parsed.items;
-
-    if (name) {
-      const n = String(name).toLowerCase();
-      items = items.filter(i =>
-        (i.Name && i.Name.toLowerCase().includes(n)) ||
-        (i.FullName && i.FullName.toLowerCase().includes(n)) ||
-        (i.SalesDesc && i.SalesDesc.toLowerCase().includes(n)) ||
-        (i.PurchaseDesc && i.PurchaseDesc.toLowerCase().includes(n))
-      );
-    }
-    if (sku) {
-      const s = String(sku).toLowerCase();
-      items = items.filter(i =>
-        (i.BarCodeValue && i.BarCodeValue.toLowerCase().includes(s)) ||
-        (i.Name && i.Name.toLowerCase().includes(s))
-      );
-    }
-    if (qmin !== undefined) {
-      const v = Number(qmin);
-      if (!Number.isNaN(v)) items = items.filter(i => (i.QuantityOnHand ?? -Infinity) >= v);
-    }
-    if (qmax !== undefined) {
-      const v = Number(qmax);
-      if (!Number.isNaN(v)) items = items.filter(i => (i.QuantityOnHand ?? Infinity) <= v);
-    }
-
-    return res.json({ count: items.length, items });
-  } catch (err) {
-    console.error('GET /debug/inventory error:', err);
-    return res.status(500).json({
-      error: 'No se pudo construir el inventario desde el último QBXML',
-      details: String(err && err.message ? err.message : err),
+function parseInventory(xml) {
+  const items = [];
+  const blocks = xml.match(/<ItemInventoryRet\b[\s\S]*?<\/ItemInventoryRet>/gi) || [];
+  for (const b of blocks) {
+    items.push({
+      ListID: extract(b, 'ListID'),
+      Name: extract(b, 'Name'),
+      FullName: extract(b, 'FullName'),
+      BarCodeValue: extract(b, 'BarCodeValue'),
+      QuantityOnHand: Number(extract(b, 'QuantityOnHand') || 0) || 0,
     });
+  }
+  return items;
+}
+
+function pickLatestInventoryXml() {
+  // 1) si pasan src explícito
+  const src = (reqSrc) => (reqSrc && fs.existsSync(reqSrc) ? reqSrc : null);
+
+  // 2) escanea /tmp por last-response-*.xml y elige el más nuevo que contenga ItemInventoryRet
+  const files = fs.readdirSync(TMP_DIR)
+    .filter(n => n.startsWith('last-response') && n.endsWith('.xml'))
+    .map(n => path.join(TMP_DIR, n))
+    .sort((a,b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+
+  for (const f of files) {
+    const xml = read(f);
+    if (/<ItemInventoryRet\b/i.test(xml)) return { file: f, xml };
+  }
+
+  // 3) fallback al last-response.xml tradicional
+  return { file: LAST_RESP, xml: read(LAST_RESP) };
+}
+
+// GET /debug/inventory  (opcional: ?persist=1&name=...&sku=...&src=/tmp/last-response-XXXX.xml)
+router.get('/inventory', (req, res) => {
+  let from = req.query.src && fs.existsSync(req.query.src)
+    ? { file: req.query.src, xml: read(req.query.src) }
+    : pickLatestInventoryXml();
+
+  const xml = from.xml || '';
+  let items = parseInventory(xml);
+
+  // filtros opcionales
+  const byName = (req.query.name || '').trim();
+  const bySku  = (req.query.sku  || '').trim();
+  if (byName) items = items.filter(i => i.Name === byName || i.FullName === byName);
+  if (bySku)  items = items.filter(i => [i.Name, i.BarCodeValue, i.ListID].includes(bySku));
+
+  const payload = { source: from.file, count: items.length, items };
+
+  // persistir si lo piden
+  const persist = /^(1|true|yes)$/i.test(String(req.query.persist || ''));
+  if (persist) {
+    fs.writeFileSync(SNAP_PATH, JSON.stringify({ count: items.length, items }, null, 2), 'utf8');
+  }
+
+  res.json(payload);
+});
+
+// GET /debug/snapshot  → ver lo último que usará shopify.sync.js
+router.get('/snapshot', (_req, res) => {
+  if (!fs.existsSync(SNAP_PATH)) return res.json({ count: 0, items: [] });
+  try {
+    const j = JSON.parse(fs.readFileSync(SNAP_PATH, 'utf8'));
+    res.json({ count: Array.isArray(j.items) ? j.items.length : 0, sample: (j.items || []).slice(0, 5) });
+  } catch {
+    res.json({ count: 0, items: [] });
   }
 });
 
