@@ -2,6 +2,10 @@
 const fs = require('fs');
 const path = require('path');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
+// Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
+const _fetch = (typeof fetch === 'function')
+  ? fetch
+  : (...args) => import('node-fetch').then(m => m.default(...args));
 
 const TMP_DIR = '/tmp';
 const SNAP_PATH = path.join(TMP_DIR, 'last-inventory.json');
@@ -11,6 +15,44 @@ const LAST_PUSH_PATH = path.join(TMP_DIR, 'shopify-last-pushed.json');
 const DEBUG = /^(1|true|yes)$/i.test(process.env.SHOPIFY_SYNC_DEBUG || '');
 const LOG_N = Number(process.env.SHOPIFY_SYNC_DEBUG_LOG_N || 10);
 function dbg(...args) { if (DEBUG) console.log('[sync]', ...args); }
+
+// === Shopify GraphQL helpers ===
+async function shopifyGraphQL(query) {
+  const url = `https://${process.env.SHOPIFY_STORE}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`;
+  const r = await _fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN,
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok || json?.errors) {
+    throw new Error(`Shopify GraphQL ${r.status}: ${JSON.stringify(json.errors || json)}`);
+  }
+  return json.data;
+}
+
+// Devuelve { variant_id, inventory_item_id, sku } o null
+async function findVariantBySkuGQL(sku) {
+  const s = String(sku || '').trim();
+  if (!s) return null;
+
+  const data = await shopifyGraphQL(
+    `{ productVariants(first: 5, query:"sku:${s}") { edges { node { id sku inventoryItem { id } } } } }`
+  );
+
+  const node = data?.productVariants?.edges?.find(e => e?.node?.sku?.trim() === s)?.node;
+  if (!node) return null;
+
+  const variant_id = Number((node.id || '').match(/ProductVariant\/(\d+)/)?.[1]);
+  const inventory_item_id = Number((node.inventoryItem?.id || '').match(/InventoryItem\/(\d+)/)?.[1]);
+  if (!variant_id || !inventory_item_id) return null;
+
+  return { variant_id, inventory_item_id, sku: node.sku, source: 'gql' };
+}
 
 // --- SKU field priority ---
 function getSkuFieldsPriority() {
@@ -83,14 +125,26 @@ async function dryRun(limit) {
     const qty = Number(it.QuantityOnHand || 0);
     let variant = null;
     try {
-      variant = await findVariantBySKU(sku);
+      // 1) Búsqueda exacta por SKU con GraphQL (fiable)
+      variant = await findVariantBySkuGQL(sku);
+      if (!variant) {
+        // 2) Fallback a tu buscador REST existente (por compatibilidad)
+        variant = await findVariantBySKU(sku);
+      }
+
       if (DEBUG && logged < LOG_N) {
-        dbg('SKU lookup', { sku, qty, found: !!variant, inventory_item_id: variant?.inventory_item_id });
+        dbg('SKU lookup', {
+          sku, qty,
+          found: !!variant,
+          source: variant?.source || 'rest',
+          inventory_item_id: variant?.inventory_item_id
+        });
         logged++;
       }
     } catch (err) {
-      console.error('[sync] findVariantBySKU error for', sku, String(err));
+      console.error('[sync] SKU lookup error for', sku, String(err));
     }
+
 
     out.push({
       sku,
@@ -138,4 +192,4 @@ async function apply(limit) {
   return { fields: plan.fields, results };
 }
 
-module.exports = { dryRun, apply };
+module.exports = { dryRun, apply, findVariantBySkuGQL, shopifyGraphQL };
