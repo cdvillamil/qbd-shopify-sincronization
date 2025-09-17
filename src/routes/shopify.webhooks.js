@@ -14,7 +14,28 @@ const TMP_DIR = process.env.LOG_DIR || '/tmp';
 
 // === snapshot de QBD para conocer QOH (QuantityOnHand)
 const INV_PATH = path.join(TMP_DIR, 'last-inventory.json');
-function loadInventory() { try { return JSON.parse(fs.readFileSync(INV_PATH,'utf8')) || {items:[]}; } catch { return {items:[]}; } }
+function loadInventory() {
+  try {
+    const raw = fs.readFileSync(INV_PATH, 'utf8');
+    const parsed = JSON.parse(raw) || {};
+    const filteredItems = Array.isArray(parsed?.items) ? parsed.items : [];
+    let sourceItems = Array.isArray(parsed?.sourceItems) ? parsed.sourceItems : [];
+
+    if (!sourceItems.length && Array.isArray(parsed?.source?.items)) {
+      sourceItems = parsed.source.items;
+    }
+
+    if (!sourceItems.length) sourceItems = filteredItems;
+
+    return {
+      ...parsed,
+      items: sourceItems,
+      filteredItems,
+    };
+  } catch {
+    return { items: [], filteredItems: [] };
+  }
+}
 function skuFields() {
   const env = process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name';
   return env.split(',').map(s => s.trim()).filter(Boolean);
