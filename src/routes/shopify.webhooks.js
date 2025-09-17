@@ -222,6 +222,8 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     });
     rememberInventoryItems(rememberEntries);
 
+    rememberInventoryItems([{ sku, inventory_item_id: invItemId, source: 'webhook-adjustment' }]);
+
     const adjustments = [{
       sku,
       delta,
