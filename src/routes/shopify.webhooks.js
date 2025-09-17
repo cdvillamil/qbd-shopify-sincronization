@@ -1,13 +1,12 @@
 // src/routes/shopify.webhooks.js
 const express = require('express');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const { getInventoryItemSku, findVariantByInventoryItemId } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
 const { enqueue, prioritizeJobs } = require('../services/jobQueue');
 const { trackPendingAdjustments } = require('../services/pendingAdjustments');
 const { resolveInventoryItemSku, rememberInventoryItems } = require('../services/inventoryItemMap');
+const { loadInventorySnapshot } = require('../services/qbd.inventorySnapshot');
 
 const router = express.Router();
 
@@ -21,31 +20,6 @@ function prioritizeShopifyAdjustments() {
 
 // === cola (mismo archivo que usa el server) ===
 const TMP_DIR = process.env.LOG_DIR || '/tmp';
-
-// === snapshot de QBD para conocer QOH (QuantityOnHand)
-const INV_PATH = path.join(TMP_DIR, 'last-inventory.json');
-function loadInventory() {
-  try {
-    const raw = fs.readFileSync(INV_PATH, 'utf8');
-    const parsed = JSON.parse(raw) || {};
-    const filteredItems = Array.isArray(parsed?.items) ? parsed.items : [];
-    let sourceItems = Array.isArray(parsed?.sourceItems) ? parsed.sourceItems : [];
-
-    if (!sourceItems.length && Array.isArray(parsed?.source?.items)) {
-      sourceItems = parsed.source.items;
-    }
-
-    if (!sourceItems.length) sourceItems = filteredItems;
-
-    return {
-      ...parsed,
-      items: sourceItems,
-      filteredItems,
-    };
-  } catch {
-    return { items: [], filteredItems: [] };
-  }
-}
 function skuFields() {
   const env = process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name';
   return env.split(',').map(s => s.trim()).filter(Boolean);
@@ -72,7 +46,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const linesIn = Array.isArray(payload.line_items) ? payload.line_items : [];
     if (!linesIn.length) return res.status(200).send('ok');
 
-    const inv = loadInventory();
+    const inv = loadInventorySnapshot();
     const fieldsPriority = skuFields();
 
     const aggregated = new Map();
@@ -198,7 +172,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     }
 
     // 2) buscar item QBD por SKU (prioridades + overrides)
-    const inv = loadInventory();
+    const inv = loadInventorySnapshot();
     const fieldsPriority = skuFields();
     const it = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
     if (!it) {

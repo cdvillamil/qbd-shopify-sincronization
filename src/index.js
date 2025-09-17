@@ -10,6 +10,7 @@ const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
 const { readJobs, enqueue, peekJob, popJob } = require('./services/jobQueue');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
 const { clearPendingByJobId, clearPendingBySkus } = require('./services/pendingAdjustments');
+const { startAutoSync: startShopifyToQbdAutoSync } = require('./services/shopify.to.qbd');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -118,6 +119,7 @@ app.use(morgan(process.env.LOG_LEVEL || 'dev'));
 app.use('/debug', require('./routes/debug.inventory'));
 app.use('/shopify', require('./routes/shopify.webhooks'));
 app.use('/sync', require('./routes/sync.qbd-to-shopify'));
+app.use('/sync', require('./routes/sync.shopify-to-qbd'));
 app.use('/shopify', require('./routes/shopify.admin'));
 
 
@@ -414,3 +416,15 @@ app.post(BASE_PATH, (req,res)=>{
 
 /* Start */
 app.listen(PORT, ()=> console.log(`[QBWC] Listening http://localhost:${PORT}${BASE_PATH}`));
+
+try {
+  const auto = startShopifyToQbdAutoSync();
+  if (auto?.enabled) {
+    console.log('[shopify->qbd] auto sync enabled', auto);
+  } else if (auto && !auto.enabled) {
+    console.log('[shopify->qbd] auto sync disabled', auto.reason || 'disabled');
+  }
+} catch (err) {
+  console.error('[shopify->qbd] auto sync init error:', err);
+}
+
