@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const router = express.Router();
+const { loadPendingAdjustments } = require('../services/pendingAdjustments');
 
 const TMP_DIR = '/tmp';
 const SNAP_PATH = path.join(TMP_DIR, 'last-inventory.json');
@@ -151,6 +152,12 @@ router.get('/snapshot', (_req, res) => {
   } catch {
     res.json({ count: 0, items: [] });
   }
+});
+
+router.get('/pending/shopify-adjustments', (_req, res) => {
+  const data = loadPendingAdjustments();
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  res.json({ count: entries.length, updatedAt: data.updatedAt || null, entries });
 });
 
 module.exports = router;
