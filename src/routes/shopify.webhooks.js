@@ -5,15 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const { getInventoryItemSku } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
+const { enqueue } = require('../services/jobQueue');
 
 const router = express.Router();
 
 // === cola (mismo archivo que usa el server) ===
-const TMP_DIR = '/tmp';
-const QUEUE_PATH = path.join(TMP_DIR, 'jobs-queue.json');
-function readJobs() { try { return JSON.parse(fs.readFileSync(QUEUE_PATH, 'utf8')) || []; } catch { return []; } }
-function writeJobs(a){ fs.writeFileSync(QUEUE_PATH, JSON.stringify(a||[], null, 2), 'utf8'); }
-function enqueue(job) { const q=readJobs(); q.push(job); writeJobs(q); return q.length; }
+const TMP_DIR = process.env.LOG_DIR || '/tmp';
 
 // === snapshot de QBD para conocer QOH (QuantityOnHand)
 const INV_PATH = path.join(TMP_DIR, 'last-inventory.json');
