@@ -9,6 +9,7 @@ const { buildInventoryQueryXML } = require('./services/inventory');
 const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
 const { readJobs, enqueue, peekJob, popJob } = require('./services/jobQueue');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
+const { clearPendingByJobId, clearPendingBySkus } = require('./services/pendingAdjustments');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -327,6 +328,24 @@ app.post(BASE_PATH, (req,res)=>{
             }
           } catch (e) {
             console.error('Auto-push init error:', e);
+          }
+        }
+        else if (current && current.type === 'inventoryAdjust') {
+          try {
+            const match = resp.match(/<InventoryAdjustmentAddRs[^>]*statusCode="(\d+)"/i);
+            const status = match ? match[1] : null;
+            const ok = !match || status === '0';
+            if (ok) {
+              if (current.id) {
+                clearPendingByJobId(current.id);
+              } else if (Array.isArray(current.skus) && current.skus.length > 0) {
+                clearPendingBySkus(current.skus);
+              }
+            } else {
+              console.warn('[inventoryAdjust] QuickBooks returned status', status, 'for job', current.id || '(no id)');
+            }
+          } catch (err) {
+            console.error('Pending Shopify adjustment cleanup error:', err);
           }
         }
         // Limpio current job

@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
+const { loadPendingAdjustments } = require('./pendingAdjustments');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
   ? fetch
@@ -103,7 +104,22 @@ function saveLastPush(plan) {
 async function dryRun(limit) {
   const { items } = loadSnapshot();
   const fields = getSkuFieldsPriority();
-  dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length });
+  const pendingData = loadPendingAdjustments();
+  const pendingMap = new Map();
+  for (const entry of pendingData.entries || []) {
+    const sku = String(entry?.sku || '').trim().toLowerCase();
+    if (!sku || pendingMap.has(sku)) continue;
+    pendingMap.set(sku, entry);
+  }
+  if (DEBUG && pendingMap.size > 0) {
+    dbg('pending Shopify adjustments detected', Array.from(pendingMap.entries()).map(([sku, info]) => ({
+      sku,
+      source: info?.source,
+      jobId: info?.jobId || null,
+      delta: info?.delta,
+    })));
+  }
+  dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length, pendingSkus: pendingMap.size });
 
   const out = [];
   if (!items || items.length === 0) {
@@ -119,6 +135,24 @@ async function dryRun(limit) {
         dbg('item without SKU by fields', { fields, itemKeys: Object.keys(it || {}) });
         logged++;
       }
+      continue;
+    }
+
+    const skuLc = sku.toLowerCase();
+    if (pendingMap.has(skuLc)) {
+      const meta = pendingMap.get(skuLc) || {};
+      if (DEBUG && logged < LOG_N) {
+        dbg('skip due to pending Shopify adjustment', { sku, jobId: meta.jobId || null, source: meta.source });
+        logged++;
+      }
+      out.push({
+        sku,
+        target: Number(it.QuantityOnHand || 0),
+        inventory_item_id: null,
+        action: 'SKIP_PENDING',
+        pendingSource: meta.source || 'shopify',
+        pendingJobId: meta.jobId || null,
+      });
       continue;
     }
 
@@ -172,6 +206,11 @@ async function apply(limit) {
   }
 
   for (const op of plan.ops) {
+    if (op.action === 'SKIP_PENDING') {
+      if (DEBUG) dbg('apply skip pending', { sku: op.sku, jobId: op.pendingJobId || null });
+      results.push({ ...op, ok: false, error: 'PENDING_SHOPIFY' });
+      continue;
+    }
     if (op.action !== 'SET_AVAILABLE' || !op.inventory_item_id) {
       if (DEBUG) dbg('apply skip', { reason: 'NO_MATCH', sku: op.sku });
       results.push({ ...op, ok: false, error: 'NO_MATCH' });
