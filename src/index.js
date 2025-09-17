@@ -283,9 +283,10 @@ app.post(BASE_PATH, (req,res)=>{
         if (current && current.type === 'inventoryQuery') {
           const parsedItems = parseInventorySnapshot(resp);
           const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
+          const generatedAt = new Date().toISOString();
           const snapshotPayload = {
             count: todaysItems.length,
-            filteredAt: new Date().toISOString(),
+            filteredAt: generatedAt,
             filter: {
               mode: 'TimeModifiedSameDay',
               timezoneOffsetMinutes: new Date().getTimezoneOffset(),
@@ -294,6 +295,8 @@ app.post(BASE_PATH, (req,res)=>{
               sourceCount: parsedItems.length,
             },
             items: todaysItems,
+            sourceGeneratedAt: generatedAt,
+            sourceItems: parsedItems,
           };
 
           save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));
