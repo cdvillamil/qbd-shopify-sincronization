@@ -5,10 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const { getInventoryItemSku } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
-const { enqueue } = require('../services/jobQueue');
+const { enqueue, prioritizeJobs } = require('../services/jobQueue');
 const { trackPendingAdjustments } = require('../services/pendingAdjustments');
 
 const router = express.Router();
+
+function prioritizeShopifyAdjustments() {
+  prioritizeJobs((job) => {
+    if (!job || job.type !== 'inventoryAdjust') return false;
+    const source = String(job.source || '').toLowerCase();
+    return source.startsWith('shopify-');
+  });
+}
 
 // === cola (mismo archivo que usa el server) ===
 const TMP_DIR = process.env.LOG_DIR || '/tmp';
@@ -128,6 +136,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
         skus: adjustments.map((a) => a.sku).filter(Boolean),
         pendingAdjustments: adjustments,
       });
+      prioritizeShopifyAdjustments();
       trackPendingAdjustments(jobId, adjustments);
     }
 
@@ -195,6 +204,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       pendingAdjustments: adjustments,
     });
 
+    prioritizeShopifyAdjustments();
     trackPendingAdjustments(jobId, adjustments);
 
     return res.status(200).json({ ok: true, sku, qbdQoh, available, delta, jobId });

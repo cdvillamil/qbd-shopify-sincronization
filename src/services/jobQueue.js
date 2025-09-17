@@ -40,6 +40,30 @@ function enqueue(job) {
   return jobs.length;
 }
 
+function prioritizeJobs(predicate) {
+  if (typeof predicate !== 'function') return readJobs();
+  const jobs = readJobs();
+  if (jobs.length <= 1) return jobs;
+
+  const prioritized = [];
+  const rest = [];
+  for (const job of jobs) {
+    if (predicate(job)) {
+      prioritized.push(job);
+    } else {
+      rest.push(job);
+    }
+  }
+
+  if (prioritized.length === 0 || rest.length === 0) {
+    return jobs;
+  }
+
+  const next = prioritized.concat(rest);
+  writeJobs(next);
+  return next;
+}
+
 function peekJob() {
   const jobs = readJobs();
   return jobs.length > 0 ? jobs[0] : null;
@@ -60,4 +84,5 @@ module.exports = {
   enqueue,
   peekJob,
   popJob,
+  prioritizeJobs,
 };
