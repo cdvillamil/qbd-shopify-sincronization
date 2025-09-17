@@ -6,6 +6,8 @@ const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
 const { buildInventoryQueryXML } = require('./services/inventory');
+const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
+const { readJobs, enqueue, peekJob, popJob } = require('./services/jobQueue');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
 require('dotenv').config();
 
@@ -14,7 +16,6 @@ const PORT      = process.env.PORT || 8080;             // En Azure Linux escuch
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LOG_DIR   = process.env.LOG_DIR || '/tmp';
 const TNS       = 'http://developer.intuit.com/';
-const JOBS_FILE = path.join(LOG_DIR, 'jobs.json');
 const CUR_JOB   = path.join(LOG_DIR, 'current-job.json');
 
 function ensureLogDir(){ try{ fs.mkdirSync(LOG_DIR,{recursive:true}); }catch{} }
@@ -42,15 +43,6 @@ function envelope(body){
          `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">`+
          `<soap:Body>${body}</soap:Body></soap:Envelope>`;
 }
-
-/* ===== Cola de trabajos (persistida en /tmp) ===== */
-function readJobs(){
-  try{ ensureLogDir(); return JSON.parse(readText(JOBS_FILE)||'[]'); }catch{ return []; }
-}
-function writeJobs(list){ ensureLogDir(); fs.writeFileSync(JOBS_FILE, JSON.stringify(list,null,2)); }
-function enqueue(job){ const L = readJobs(); L.push(job); writeJobs(L); }
-function peekJob(){ const L = readJobs(); return L[0] || null; }
-function popJob(){ const L = readJobs(); const j = L.shift(); writeJobs(L); return j||null; }
 
 /* Generar QBXML según el job */
 function qbxmlFor(job) {
