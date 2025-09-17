@@ -9,9 +9,34 @@
 //
 // También dejo un parser sencillo por si lo usas en otros lugares.
 
-function buildInventoryQueryXML(max = 0, qbxmlVer = process.env.QBXML_VER || '16.0') {
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function formatQBDateTime(input) {
+  if (!input) return null;
+  const dt = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(dt.valueOf())) return null;
+  const datePart = [
+    dt.getFullYear(),
+    pad2(dt.getMonth() + 1),
+    pad2(dt.getDate())
+  ].join('-');
+  const timePart = [
+    pad2(dt.getHours()),
+    pad2(dt.getMinutes()),
+    pad2(dt.getSeconds())
+  ].join(':');
+  return `${datePart}T${timePart}`;
+}
+
+function buildInventoryQueryXML(max = 0, qbxmlVer = process.env.QBXML_VER || '16.0', options = {}) {
   const ver = String(qbxmlVer || '16.0');
   const n = Number(max) || 0;
+  const opts = options || {};
+  const range = opts.modifiedDateRange || {};
+  const fromModifiedDate = formatQBDateTime(range.start ?? range.from);
+  const toModifiedDate = formatQBDateTime(range.end ?? range.to);
 
   // Encabezados con CRLF y sin caracteres raros antes del XML
   const header = `<?xml version="1.0" ?><?qbxml version="${ver}"?>\r\n`;
@@ -19,6 +44,14 @@ function buildInventoryQueryXML(max = 0, qbxmlVer = process.env.QBXML_VER || '16
     `<QBXML>\r\n` +
     `  <QBXMLMsgsRq onError="stopOnError">\r\n` +
     `    <ItemInventoryQueryRq requestID="1">\r\n`;
+
+  const filterLines = [];
+  if (fromModifiedDate) {
+    filterLines.push(`      <FromModifiedDate>${fromModifiedDate}</FromModifiedDate>\r\n`);
+  }
+  if (toModifiedDate) {
+    filterLines.push(`      <ToModifiedDate>${toModifiedDate}</ToModifiedDate>\r\n`);
+  }
 
   // Omitimos MaxReturned si no se especifica; si lo pasas (p.ej. 50), lo incluimos.
   const maxLine = n > 0 ? `      <MaxReturned>${n}</MaxReturned>\r\n` : '';
@@ -28,7 +61,7 @@ function buildInventoryQueryXML(max = 0, qbxmlVer = process.env.QBXML_VER || '16
     `  </QBXMLMsgsRq>\r\n` +
     `</QBXML>`;
 
-  return header + openRq + maxLine + closeRq;
+  return header + openRq + filterLines.join('') + maxLine + closeRq;
 }
 
 // Parser opcional (no cambia tu flujo actual)

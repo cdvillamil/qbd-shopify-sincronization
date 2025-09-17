@@ -6,6 +6,7 @@ const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
 const { buildInventoryQueryXML } = require('./services/inventory');
+const { parseInventoryFromQBXML } = require('./services/inventoryParser');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -22,7 +23,7 @@ function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
 function sendFileSmart(res, file){
   if(!fs.existsSync(file)) return res.status(404).send('not found');
-  const s = fs.readFileSync(file,'utf8'); 
+  const s = fs.readFileSync(file,'utf8');
   const looksXml = s.trim().startsWith('<');
   const looksJson = s.trim().startsWith('{')||s.trim().startsWith('[');
   res.type(looksXml?'application/xml':looksJson?'application/json':'text/plain').send(s);
@@ -58,7 +59,30 @@ function qbxmlFor(job) {
   if (job.type === 'inventoryQuery') {
     // Usamos el builder del servicio (desacople suave)
     const max = Number(job.max) || Number(process.env.INVENTORY_MAX || 50);
-    return buildInventoryQueryXML(max, process.env.QBXML_VER || '13.0');
+    const now = new Date();
+    const presetRange = job.filterRange
+      ? {
+          start: parseQBDate(job.filterRange.start),
+          end: parseQBDate(job.filterRange.end),
+        }
+      : null;
+    const hasPresetRange = Boolean(presetRange?.start && presetRange?.end);
+    const range = hasPresetRange ? presetRange : getTodayRange(now);
+    const qbxml = buildInventoryQueryXML(
+      max,
+      process.env.QBXML_VER || '13.0',
+      { modifiedDateRange: { start: range.start, end: range.end } }
+    );
+
+    job.filterRange = {
+      start: range.start.toISOString(),
+      end: range.end.toISOString(),
+      generatedAt: now.toISOString(),
+      timezoneOffsetMinutes: now.getTimezoneOffset(),
+      source: hasPresetRange ? 'job' : 'generated',
+    };
+
+    return qbxml;
   }
 
    if (job.type === 'inventoryAdjust') {
@@ -72,16 +96,66 @@ function qbxmlFor(job) {
 
 
 /* Parseo simple del ItemInventoryRet (sin libs) */
-function parseInventory(qbxml){
-  const out = [];
-  const blocks = qbxml.match(/<ItemInventoryRet[\s\S]*?<\/ItemInventoryRet>/g) || [];
-  for (const b of blocks){
-    const ListID = extract(b,'ListID');
-    const FullName = extract(b,'FullName');
-    const QuantityOnHand = Number(extract(b,'QuantityOnHand')||0);
-    out.push({ ListID, FullName, QuantityOnHand });
+function parseInventorySnapshot(qbxml){
+  try {
+    const parsed = parseInventoryFromQBXML(qbxml) || {};
+    return Array.isArray(parsed.items) ? parsed.items : [];
+  } catch (e) {
+    console.error('Inventory parse error:', e);
+    return [];
   }
-  return out;
+}
+
+function shouldAutoPush(){
+  const raw = process.env.SHOPIFY_AUTO_PUSH;
+  if (raw == null || raw === '') return true;
+  return /^(1|true|yes)$/i.test(String(raw).trim());
+}
+
+function getTodayRange(now = new Date()){
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+function parseQBDate(value){
+  if (!value) return null;
+  const dt = new Date(value);
+  return Number.isNaN(dt.valueOf()) ? null : dt;
+}
+
+function pickRelevantTimestamp(item){
+  return item?.TimeModified || item?.TimeCreated || null;
+}
+
+function filterInventoryForToday(items, now = new Date(), rangeOverride = null){
+  const defaultRange = getTodayRange(now);
+  const overrideStart = rangeOverride && rangeOverride.start
+    ? (rangeOverride.start instanceof Date ? rangeOverride.start : parseQBDate(rangeOverride.start))
+    : null;
+  const overrideEnd = rangeOverride && rangeOverride.end
+    ? (rangeOverride.end instanceof Date ? rangeOverride.end : parseQBDate(rangeOverride.end))
+    : null;
+
+  let start = overrideStart || defaultRange.start;
+  let end = overrideEnd || defaultRange.end;
+
+  if (!(end > start)) {
+    const fallback = getTodayRange(now);
+    start = overrideStart || fallback.start;
+    end = overrideEnd || fallback.end;
+    if (!(end > start)) {
+      end = new Date(start);
+      end.setDate(end.getDate() + 1);
+    }
+  }
+
+  const filtered = (items || []).filter((item) => {
+    const stamp = parseQBDate(pickRelevantTimestamp(item));
+    return stamp && stamp >= start && stamp < end;
+  });
+  return { filtered, start, end };
 }
 
 /* ===== App ===== */
@@ -226,9 +300,9 @@ app.post(BASE_PATH, (req,res)=>{
         let job = peekJob();
         if (job){
           // Guardamos como "current" y lo sacamos de la cola
-          fs.writeFileSync(CUR_JOB, JSON.stringify(job));
           popJob();
           const qbxml = qbxmlFor(job);
+          fs.writeFileSync(CUR_JOB, JSON.stringify(job));
           save('last-request-qbxml.xml', qbxml);
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;
         }else{
@@ -247,22 +321,71 @@ app.post(BASE_PATH, (req,res)=>{
         try{ current = JSON.parse(readText(CUR_JOB)||'null'); }catch{}
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
         if (current && current.type === 'inventoryQuery') {
-          const items = parseInventory(resp); // o tu parseInventoryFromQBXML si ya lo usas
-          save('last-inventory.json', JSON.stringify({ count: items.length, items }, null, 2));
+          const parsedItems = parseInventorySnapshot(resp);
+          const rangeOverride = current.filterRange
+            ? {
+                start: parseQBDate(current.filterRange.start),
+                end: parseQBDate(current.filterRange.end),
+              }
+            : null;
+          const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems, new Date(), rangeOverride);
+          const tzMinutesFromJob = Number.isFinite(current?.filterRange?.timezoneOffsetMinutes)
+            ? Number(current.filterRange.timezoneOffsetMinutes)
+            : new Date().getTimezoneOffset();
+          const filterMeta = {
+            mode: 'TimeModifiedSameDay',
+            timezoneOffsetMinutes: tzMinutesFromJob,
+            start: start.toISOString(),
+            endExclusive: end.toISOString(),
+            sourceCount: parsedItems.length,
+          };
+          if (current.filterRange) {
+            const requested = {
+              start: current.filterRange.start,
+              endExclusive: current.filterRange.end,
+              generatedAt: current.filterRange.generatedAt,
+              source: current.filterRange.source,
+            };
+            Object.keys(requested).forEach((key) => {
+              if (requested[key] == null) delete requested[key];
+            });
+            if (Object.keys(requested).length > 0) {
+              filterMeta.requested = requested;
+            }
+          }
+          const snapshotPayload = {
+            count: todaysItems.length,
+            filteredAt: new Date().toISOString(),
+            filter: filterMeta,
+            items: todaysItems,
+          };
+
+          save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));
+          console.log('[inventory] snapshot filtered', {
+            totalReceived: parsedItems.length,
+            kept: todaysItems.length,
+            start: start.toISOString(),
+            end: end.toISOString(),
+            rangeSource: filterMeta.requested?.source || 'generated',
+          });
 
           // --- Auto push a Shopify (después de persistir el snapshot) ---
           try {
-            const shouldAuto = String(process.env.SHOPIFY_AUTO_PUSH || '').toLowerCase() === 'true';
-
-            // (opcional) Solo si la respuesta fue exitosa
             const m = resp.match(/<ItemInventoryQueryRs[^>]*statusCode="(\d+)"/i);
             const ok = !m || m[1] === '0';
+            const auto = shouldAutoPush();
 
-            if (shouldAuto && ok) {
+            if (auto && !ok) {
+              console.warn('Auto-push skipped due to QuickBooks error status.');
+            }
+
+            if (auto && ok && todaysItems.length > 0) {
               const { apply } = require('./services/shopify.sync');
               setImmediate(() =>
                 apply().catch(e => console.error('Shopify apply error:', e))
               );
+            } else if (auto && todaysItems.length === 0) {
+              console.log('Auto-push skipped: no inventory changes detected for today.');
             }
           } catch (e) {
             console.error('Auto-push init error:', e);
