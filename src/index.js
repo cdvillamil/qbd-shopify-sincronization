@@ -58,7 +58,10 @@ function qbxmlFor(job) {
 
   if (job.type === 'inventoryQuery') {
     // Usamos el builder del servicio (desacople suave)
-    const max = Number(job.max) || Number(process.env.INVENTORY_MAX || 50);
+    const hasExplicitMax =
+      Object.prototype.hasOwnProperty.call(job, 'max') && job.respectMax === true;
+    const requestedMax = hasExplicitMax ? Number(job.max) : NaN;
+    const max = Number.isFinite(requestedMax) && requestedMax > 0 ? Math.floor(requestedMax) : 0;
     return buildInventoryQueryXML(max, process.env.QBXML_VER || '13.0');
   }
 
@@ -156,9 +159,17 @@ app.get('/debug/last-response', (req, res) => sendFileSmart(res, fp('last-respon
 /* Nueva cola: ver y sembrar */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
 app.get('/debug/seed-inventory', (req,res)=>{
-  const max = Number(req.query.max)||25;
-  enqueue({ type:'inventoryQuery', max, ts:new Date().toISOString() });
-  res.json({ ok:true, queued:{ type:'inventoryQuery', max }});
+  const job = { type:'inventoryQuery', ts:new Date().toISOString() };
+  const rawMax = req.query.max;
+  if (rawMax != null) {
+    const parsedMax = Number(rawMax);
+    if (Number.isFinite(parsedMax) && parsedMax > 0) {
+      job.max = Math.floor(parsedMax);
+      job.respectMax = true;
+    }
+  }
+  enqueue(job);
+  res.json({ ok:true, queued:job });
 });
 app.get('/debug/inventory', (req,res)=>{
   sendFileSmart(res, fp('last-inventory.json'));
@@ -206,10 +217,10 @@ app.post(BASE_PATH, (req,res)=>{
 
         // justo después de calcular ok=true en authenticate:
         if (ok && process.env.AUTO_SEED_ON_AUTH === 'true') {
-          enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 50), ts: new Date().toISOString() });
+          enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
         }
         if (process.env.AUTO_ENQUEUE_INVENTORY_QUERY === 'true') {
-          enqueue({ type: 'inventoryQuery', max: Number(process.env.INVENTORY_MAX || 100), ts: new Date().toISOString() });
+          enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
         }
 
 
