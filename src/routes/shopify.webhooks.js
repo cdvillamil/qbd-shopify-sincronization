@@ -5,9 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const { getInventoryItemSku } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
-const { enqueue } = require('../services/jobQueue');
+const { enqueue, prioritizeJobs } = require('../services/jobQueue');
+const { trackPendingAdjustments } = require('../services/pendingAdjustments');
 
 const router = express.Router();
+
+function prioritizeShopifyAdjustments() {
+  prioritizeJobs((job) => {
+    if (!job || job.type !== 'inventoryAdjust') return false;
+    const source = String(job.source || '').toLowerCase();
+    return source.startsWith('shopify-');
+  });
+}
 
 // === cola (mismo archivo que usa el server) ===
 const TMP_DIR = process.env.LOG_DIR || '/tmp';
@@ -65,7 +74,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const inv = loadInventory();
     const fieldsPriority = skuFields();
 
-    const lines = [];
+    const aggregated = new Map();
     const notFound = [];
 
     for (const li of linesIn) {
@@ -77,23 +86,61 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       if (!it) { notFound.push(sku); continue; }
 
       const delta = -qty; // venta descuenta
-      const line = it.ListID
-        ? { ListID: it.ListID, QuantityDifference: delta }
-        : { FullName: it.FullName || it.Name, QuantityDifference: delta };
-      lines.push(line);
+      const key = it.ListID
+        ? `id:${it.ListID}`
+        : `name:${String(it.FullName || it.Name || sku).trim().toLowerCase()}`;
+
+      if (!aggregated.has(key)) {
+        aggregated.set(key, {
+          sku,
+          delta: 0,
+          qbdQoh: Number(it.QuantityOnHand || 0),
+          listId: it.ListID || null,
+          fullName: it.FullName || it.Name || sku,
+        });
+      }
+
+      const entry = aggregated.get(key);
+      entry.delta += delta;
     }
 
+    const lines = [];
+    const adjustments = [];
+    for (const entry of aggregated.values()) {
+      if (!entry.delta) continue;
+      const line = entry.listId
+        ? { ListID: entry.listId, QuantityDifference: entry.delta }
+        : { FullName: entry.fullName, QuantityDifference: entry.delta };
+      lines.push(line);
+      adjustments.push({
+        sku: entry.sku,
+        delta: entry.delta,
+        qbdQoh: entry.qbdQoh,
+        target: Number.isFinite(entry.qbdQoh) ? entry.qbdQoh + entry.delta : undefined,
+        source: 'shopify-order',
+        note: payload?.name ? `order ${payload.name}` : undefined,
+      });
+    }
+
+    let jobId = null;
+
     if (lines.length) {
+      jobId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
       enqueue({
+        id: jobId,
         type: 'inventoryAdjust',
         lines,
         account: process.env.QBD_ADJUST_ACCOUNT || undefined,
         source: 'shopify-order',
         createdAt: new Date().toISOString(),
+        skus: adjustments.map((a) => a.sku).filter(Boolean),
+        pendingAdjustments: adjustments,
       });
+      prioritizeShopifyAdjustments();
+      trackPendingAdjustments(jobId, adjustments);
     }
 
-    return res.status(200).json({ ok: true, queuedLines: lines.length, notFound });
+    return res.status(200).json({ ok: true, queuedLines: lines.length, notFound, jobId });
   } catch (e) {
     console.error('orders/paid webhook error:', e);
     return res.status(500).send('error');
@@ -129,19 +176,38 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     const delta = available - qbdQoh;
     if (!delta) return res.status(200).send('ok');
 
+    const adjustments = [{
+      sku,
+      delta,
+      available,
+      qbdQoh,
+      target: available,
+      inventory_item_id: invItemId,
+      source: 'shopify-inventory-level',
+      note: payload?.location_id ? `location ${payload.location_id}` : undefined,
+    }];
+
     const line = it.ListID
       ? { ListID: it.ListID, QuantityDifference: delta }
       : { FullName: it.FullName || it.Name, QuantityDifference: delta };
 
+    const jobId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+
     enqueue({
+      id: jobId,
       type: 'inventoryAdjust',
       lines: [line],
       account: process.env.QBD_ADJUST_ACCOUNT || undefined,
       source: 'shopify-inventory-level',
       createdAt: new Date().toISOString(),
+      skus: [sku],
+      pendingAdjustments: adjustments,
     });
 
-    return res.status(200).json({ ok: true, sku, qbdQoh, available, delta });
+    prioritizeShopifyAdjustments();
+    trackPendingAdjustments(jobId, adjustments);
+
+    return res.status(200).json({ ok: true, sku, qbdQoh, available, delta, jobId });
   } catch (e) {
     console.error('inventory_levels/update webhook error:', e);
     return res.status(500).send('error');

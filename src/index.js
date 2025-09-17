@@ -9,6 +9,7 @@ const { buildInventoryQueryXML } = require('./services/inventory');
 const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
 const { readJobs, enqueue, peekJob, popJob } = require('./services/jobQueue');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
+const { clearPendingByJobId, clearPendingBySkus } = require('./services/pendingAdjustments');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -329,11 +330,52 @@ app.post(BASE_PATH, (req,res)=>{
             console.error('Auto-push init error:', e);
           }
         }
+        else if (current && current.type === 'inventoryAdjust') {
+          try {
+            const match = resp.match(/<InventoryAdjustmentAddRs[^>]*statusCode="(\d+)"/i);
+            const status = match ? match[1] : null;
+            const ok = !match || status === '0';
+            if (ok) {
+              if (current.id) {
+                clearPendingByJobId(current.id);
+              } else if (Array.isArray(current.skus) && current.skus.length > 0) {
+                clearPendingBySkus(current.skus);
+              }
+              try {
+                const remaining = readJobs();
+                const hasRefreshQuery = remaining.some((job) => job && job.type === 'inventoryQuery');
+                if (!hasRefreshQuery) {
+                  enqueue({
+                    type: 'inventoryQuery',
+                    ts: new Date().toISOString(),
+                    source: 'shopify-adjust-refresh',
+                    triggeredBy: current.id || null,
+                  });
+                }
+              } catch (queueErr) {
+                console.error('inventoryAdjust refresh enqueue error:', queueErr);
+              }
+            } else {
+              console.warn('[inventoryAdjust] QuickBooks returned status', status, 'for job', current.id || '(no id)');
+            }
+          } catch (err) {
+            console.error('Pending Shopify adjustment cleanup error:', err);
+          }
+        }
         // Limpio current job
         try{ fs.unlinkSync(CUR_JOB); }catch{}
 
-        // 100 => terminado este ciclo
-        bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>100</receiveResponseXMLResult></receiveResponseXMLResponse>`;
+        let progress = '100';
+        try {
+          const remainingJobs = readJobs();
+          if (Array.isArray(remainingJobs) && remainingJobs.length > 0) {
+            progress = '0';
+          }
+        } catch (err) {
+          console.error('queue progress check failed:', err);
+        }
+
+        bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>${progress}</receiveResponseXMLResult></receiveResponseXMLResponse>`;
       }
       else if (is('getLastError')) {
         bodyXml = `<getLastErrorResponse xmlns="${TNS}"><getLastErrorResult></getLastErrorResult></getLastErrorResponse>`;
