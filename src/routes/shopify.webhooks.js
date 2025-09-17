@@ -7,6 +7,7 @@ const { getInventoryItemSku } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
 const { enqueue, prioritizeJobs } = require('../services/jobQueue');
 const { trackPendingAdjustments } = require('../services/pendingAdjustments');
+const { resolveInventoryItemSku, rememberInventoryItems } = require('../services/inventoryItemMap');
 
 const router = express.Router();
 
@@ -162,7 +163,13 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     if (!invItemId || Number.isNaN(available)) return res.status(200).send('ok');
 
     // 1) obtener SKU desde inventory_item_id
-    const sku = await getInventoryItemSku(invItemId).catch(()=>null);
+    let sku = resolveInventoryItemSku(invItemId);
+    if (!sku) {
+      sku = await getInventoryItemSku(invItemId).catch(() => null);
+      if (sku) {
+        rememberInventoryItems([{ sku, inventory_item_id: invItemId, source: 'webhook-lookup' }]);
+      }
+    }
     if (!sku) return res.status(200).send('ok');
 
     // 2) buscar item QBD por SKU (prioridades + overrides)
@@ -175,6 +182,8 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     const qbdQoh = Number(it.QuantityOnHand || 0);
     const delta = available - qbdQoh;
     if (!delta) return res.status(200).send('ok');
+
+    rememberInventoryItems([{ sku, inventory_item_id: invItemId, source: 'webhook-adjustment' }]);
 
     const adjustments = [{
       sku,

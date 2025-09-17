@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
+const { rememberInventoryItems } = require('./inventoryItemMap');
 const { loadPendingAdjustments } = require('./pendingAdjustments');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
@@ -166,6 +167,17 @@ async function dryRun(limit) {
         variant = await findVariantBySKU(sku);
       }
 
+      if (variant?.inventory_item_id && sku) {
+        rememberInventoryItems([
+          {
+            sku,
+            inventory_item_id: variant.inventory_item_id,
+            variant_id: variant.variant_id || variant.id || null,
+            source: `lookup-${variant.source || 'rest'}`,
+          },
+        ]);
+      }
+
       if (DEBUG && logged < LOG_N) {
         dbg('SKU lookup', {
           sku, qty,
@@ -219,6 +231,15 @@ async function apply(limit) {
     try {
       if (DEBUG) dbg('apply set', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target });
       await setInventoryLevel(op.inventory_item_id, op.target);
+      if (op.sku) {
+        rememberInventoryItems([
+          {
+            sku: op.sku,
+            inventory_item_id: op.inventory_item_id,
+            source: 'sync-apply',
+          },
+        ]);
+      }
       results.push({ ...op, ok: true });
     } catch (e) {
       console.error('[sync] setInventoryLevel error', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target, err: String(e && e.message || e) });
