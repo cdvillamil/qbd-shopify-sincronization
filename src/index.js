@@ -150,7 +150,34 @@ function filterInventoryForToday(items, now = new Date(), rangeOverride = null){
       end.setDate(end.getDate() + 1);
     }
   }
+  }
+}
 
+function shouldAutoPush(){
+  const raw = process.env.SHOPIFY_AUTO_PUSH;
+  if (raw == null || raw === '') return true;
+  return /^(1|true|yes)$/i.test(String(raw).trim());
+}
+
+function getTodayRange(now = new Date()){
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+function parseQBDate(value){
+  if (!value) return null;
+  const dt = new Date(value);
+  return Number.isNaN(dt.valueOf()) ? null : dt;
+}
+
+function pickRelevantTimestamp(item){
+  return item?.TimeModified || item?.TimeCreated || null;
+}
+
+function filterInventoryForToday(items, now = new Date()){
+  const { start, end } = getTodayRange(now);
   const filtered = (items || []).filter((item) => {
     const stamp = parseQBDate(pickRelevantTimestamp(item));
     return stamp && stamp >= start && stamp < end;
@@ -357,11 +384,23 @@ app.post(BASE_PATH, (req,res)=>{
             count: todaysItems.length,
             filteredAt: new Date().toISOString(),
             filter: filterMeta,
+          const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
+          const snapshotPayload = {
+            count: todaysItems.length,
+            filteredAt: new Date().toISOString(),
+            filter: {
+              mode: 'TimeModifiedSameDay',
+              timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+              start: start.toISOString(),
+              endExclusive: end.toISOString(),
+              sourceCount: parsedItems.length,
+            },
             items: todaysItems,
           };
 
           save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));
           console.log('[inventory] snapshot filtered', {
+          console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
             kept: todaysItems.length,
             start: start.toISOString(),
