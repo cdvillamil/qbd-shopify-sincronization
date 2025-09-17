@@ -1,4 +1,5 @@
-// src/services/shopify.client.js
+'use strict';
+
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
 const STORE = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_TOKEN;
@@ -9,30 +10,32 @@ function base() {
   return `https://${STORE}/admin/api/${API_VERSION}`;
 }
 
-async function shopifyFetch(path, method='GET', body) {
+async function shopifyFetch(path, method = 'GET', body) {
   const url = `${base()}${path}`;
   const opts = {
     method,
     headers: {
       'X-Shopify-Access-Token': TOKEN,
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
   if (!res.ok) {
-    const text = await res.text().catch(()=> '');
+    const text = await res.text().catch(() => '');
     throw new Error(`Shopify ${method} ${path} -> ${res.status} ${text}`);
   }
-  const ct = res.headers.get('content-type')||'';
+  const ct = res.headers.get('content-type') || '';
   return ct.includes('application/json') ? res.json() : res.text();
 }
 
 async function findVariantBySKU(sku) {
-  const q = encodeURIComponent(sku);
+  const raw = String(sku || '').trim();
+  if (!raw) return null;
+  const q = encodeURIComponent(raw);
   const data = await shopifyFetch(`/variants.json?sku=${q}`, 'GET');
-  const v = (data.variants || [])[0];
+  const v = Array.isArray(data?.variants) ? data.variants[0] : null;
   if (!v) return null;
   return {
     id: v.id,
@@ -40,6 +43,22 @@ async function findVariantBySKU(sku) {
     product_id: v.product_id,
     inventory_item_id: v.inventory_item_id,
     title: v.title,
+  };
+}
+
+async function findVariantByInventoryItemId(inventory_item_id) {
+  const raw = String(inventory_item_id || '').trim();
+  if (!raw) return null;
+  const data = await shopifyFetch(`/variants.json?inventory_item_ids=${encodeURIComponent(raw)}`, 'GET');
+  const variants = Array.isArray(data?.variants) ? data.variants : [];
+  const match = variants.find((variant) => String(variant?.inventory_item_id || '').trim() === raw) || variants[0] || null;
+  if (!match || !match.sku) return null;
+  return {
+    id: match.id,
+    sku: match.sku,
+    product_id: match.product_id,
+    inventory_item_id: match.inventory_item_id,
+    title: match.title,
   };
 }
 
@@ -62,4 +81,10 @@ async function listLocations() {
   return data?.locations || [];
 }
 
-module.exports = { findVariantBySKU, getInventoryItemSku, setInventoryLevel, listLocations };
+module.exports = {
+  findVariantBySKU,
+  findVariantByInventoryItemId,
+  getInventoryItemSku,
+  setInventoryLevel,
+  listLocations,
+};
