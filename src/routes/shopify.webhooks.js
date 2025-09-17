@@ -3,7 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { getInventoryItemSku } = require('../services/shopify.client');
+const { getInventoryItemSku, findVariantByInventoryItemId } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
 const { enqueue, prioritizeJobs } = require('../services/jobQueue');
 const { trackPendingAdjustments } = require('../services/pendingAdjustments');
@@ -164,24 +164,63 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
 
     // 1) obtener SKU desde inventory_item_id
     let sku = resolveInventoryItemSku(invItemId);
+    let variantMeta = null;
+    const rememberEntries = [];
+
     if (!sku) {
-      sku = await getInventoryItemSku(invItemId).catch(() => null);
-      if (sku) {
-        rememberInventoryItems([{ sku, inventory_item_id: invItemId, source: 'webhook-lookup' }]);
+      variantMeta = await findVariantByInventoryItemId(invItemId).catch(() => null);
+      if (variantMeta?.sku) {
+        sku = variantMeta.sku;
+        rememberEntries.push({
+          sku,
+          inventory_item_id: invItemId,
+          variant_id: variantMeta.id,
+          source: 'webhook-variant-lookup',
+        });
       }
     }
-    if (!sku) return res.status(200).send('ok');
+
+    if (!sku) {
+      const fallbackSku = await getInventoryItemSku(invItemId).catch(() => null);
+      if (fallbackSku) {
+        sku = fallbackSku;
+        rememberEntries.push({
+          sku,
+          inventory_item_id: invItemId,
+          source: 'webhook-inventory-item',
+        });
+      }
+    }
+
+    if (!sku) {
+      if (rememberEntries.length) rememberInventoryItems(rememberEntries);
+      return res.status(200).send('ok');
+    }
 
     // 2) buscar item QBD por SKU (prioridades + overrides)
     const inv = loadInventory();
     const fieldsPriority = skuFields();
     const it = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
-    if (!it) return res.status(200).send('ok');
+    if (!it) {
+      if (rememberEntries.length) rememberInventoryItems(rememberEntries);
+      return res.status(200).send('ok');
+    }
 
     // 3) calcular delta con respecto a QBD (snapshot)
     const qbdQoh = Number(it.QuantityOnHand || 0);
     const delta = available - qbdQoh;
-    if (!delta) return res.status(200).send('ok');
+    if (!delta) {
+      if (rememberEntries.length) rememberInventoryItems(rememberEntries);
+      return res.status(200).send('ok');
+    }
+
+    rememberEntries.push({
+      sku,
+      inventory_item_id: invItemId,
+      variant_id: variantMeta?.id,
+      source: 'webhook-adjustment',
+    });
+    rememberInventoryItems(rememberEntries);
 
     rememberInventoryItems([{ sku, inventory_item_id: invItemId, source: 'webhook-adjustment' }]);
 
