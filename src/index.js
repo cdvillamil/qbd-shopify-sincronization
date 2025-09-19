@@ -328,6 +328,7 @@ app.post(BASE_PATH, (req,res)=>{
               sourceCount: parsedItems.length,
             },
             items: todaysItems,
+            allItems: parsedItems,
           };
 
           save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));

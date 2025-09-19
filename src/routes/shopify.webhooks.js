@@ -15,12 +15,14 @@ const router = express.Router();
 const INV_PATH = path.join(LOG_DIR, 'last-inventory.json');
 function loadInventory() {
   try {
-    if (!fs.existsSync(INV_PATH)) return { items: [] };
-    const data = JSON.parse(fs.readFileSync(INV_PATH, 'utf8'));
-    return data && Array.isArray(data.items) ? data : { items: [] };
+    if (!fs.existsSync(INV_PATH)) return { items: [], allItems: [] };
+    const data = JSON.parse(fs.readFileSync(INV_PATH, 'utf8')) || {};
+    const items = Array.isArray(data.items) ? data.items : [];
+    const allItems = Array.isArray(data.allItems) ? data.allItems : items;
+    return { ...data, items, allItems };
   } catch (e) {
     console.warn('[shopify.webhooks] snapshot read error:', e.message || e);
-    return { items: [] };
+    return { items: [], allItems: [] };
   }
 }
 function skuFields() {
@@ -322,7 +324,8 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     // 2) buscar item QBD por SKU (prioridades + overrides)
     const inv = loadInventory();
     const fieldsPriority = skuFields();
-    const it = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
+    const searchItems = Array.isArray(inv.allItems) ? inv.allItems : inv.items || [];
+    const it = resolveSkuToItem(searchItems, sku, fieldsPriority);
     if (!it) return res.status(200).send('ok');
 
     // 3) calcular delta con respecto a QBD (snapshot)
@@ -410,7 +413,8 @@ router.post('/webhooks/products/update', rawJson, (req, res) => {
       const sku = String(variant?.sku || '').trim();
       if (!sku) continue;
 
-      const item = resolveSkuToItem(inv.items || [], sku, fieldsPriority);
+      const searchItems = Array.isArray(inv.allItems) ? inv.allItems : inv.items || [];
+      const item = resolveSkuToItem(searchItems, sku, fieldsPriority);
       if (!item || !item.ListID || !item.EditSequence) {
         skipped.push(sku);
         continue;
