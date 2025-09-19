@@ -7,6 +7,19 @@ const fs      = require('fs');
 const crypto  = require('crypto');
 const { buildInventoryQueryXML } = require('./services/inventory');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
+const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
+const { buildSalesReceiptXML } = require('./services/qbd.salesReceipt');
+const { buildCreditMemoXML } = require('./services/qbd.creditMemo');
+const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
+const {
+  readJobs,
+  enqueueJob,
+  peekJob,
+  popJob,
+  setCurrentJob,
+  getCurrentJob,
+  clearCurrentJob,
+} = require('./services/jobQueue');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -14,8 +27,6 @@ const PORT      = process.env.PORT || 8080;             // En Azure Linux escuch
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LOG_DIR   = process.env.LOG_DIR || '/tmp';
 const TNS       = 'http://developer.intuit.com/';
-const JOBS_FILE = path.join(LOG_DIR, 'jobs.json');
-const CUR_JOB   = path.join(LOG_DIR, 'current-job.json');
 
 function ensureLogDir(){ try{ fs.mkdirSync(LOG_DIR,{recursive:true}); }catch{} }
 function fp(n){ return path.join(LOG_DIR,n); }
@@ -44,13 +55,7 @@ function envelope(body){
 }
 
 /* ===== Cola de trabajos (persistida en /tmp) ===== */
-function readJobs(){
-  try{ ensureLogDir(); return JSON.parse(readText(JOBS_FILE)||'[]'); }catch{ return []; }
-}
-function writeJobs(list){ ensureLogDir(); fs.writeFileSync(JOBS_FILE, JSON.stringify(list,null,2)); }
-function enqueue(job){ const L = readJobs(); L.push(job); writeJobs(L); }
-function peekJob(){ const L = readJobs(); return L[0] || null; }
-function popJob(){ const L = readJobs(); const j = L.shift(); writeJobs(L); return j||null; }
+function enqueue(job){ enqueueJob(job); }
 
 /* Generar QBXML según el job */
 function qbxmlFor(job) {
@@ -65,9 +70,24 @@ function qbxmlFor(job) {
     return buildInventoryQueryXML(max, process.env.QBXML_VER || '13.0');
   }
 
-   if (job.type === 'inventoryAdjust') {
-    const ver = process.env.QBXML_VER || '16.0';
+  if (job.type === 'inventoryAdjust') {
+    const ver = job.qbxmlVer || process.env.QBXML_VER || '16.0';
     return buildInventoryAdjustmentXML(job.lines || [], job.account, ver);
+  }
+
+  if (job.type === 'salesReceiptAdd') {
+    const ver = job.qbxmlVer || process.env.QBXML_VER || '16.0';
+    return buildSalesReceiptXML(job.payload || job, ver);
+  }
+
+  if (job.type === 'creditMemoAdd') {
+    const ver = job.qbxmlVer || process.env.QBXML_VER || '16.0';
+    return buildCreditMemoXML(job.payload || job, ver);
+  }
+
+  if (job.type === 'itemInventoryMod') {
+    const ver = job.qbxmlVer || process.env.QBXML_VER || '16.0';
+    return buildItemInventoryModXML(job.payload || job, ver);
   }
 
   // Mantén aquí tus otros tipos de job si los tienes
@@ -266,15 +286,22 @@ app.post(BASE_PATH, (req,res)=>{
       else if (is('sendRequestXML')) {
         // ¿Hay trabajo en cola?
         let job = peekJob();
-        if (job){
-          // Guardamos como "current" y lo sacamos de la cola
-          fs.writeFileSync(CUR_JOB, JSON.stringify(job));
+        let qbxml = '';
+        while (job) {
+          qbxml = qbxmlFor(job);
+          if (qbxml) break;
           popJob();
-          const qbxml = qbxmlFor(job);
+          job = peekJob();
+        }
+
+        if (job && qbxml) {
+          setCurrentJob(job);
+          popJob();
           save('last-request-qbxml.xml', qbxml);
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;
-        }else{
+        } else {
           // Cola vacía -> retornar cadena vacía
+          clearCurrentJob();
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult></sendRequestXMLResult></sendRequestXMLResponse>`;
         }
       }
@@ -285,8 +312,7 @@ app.post(BASE_PATH, (req,res)=>{
         save('last-response.xml', resp);
 
         // Leer job actual para decidir parseo
-        let current = null;
-        try{ current = JSON.parse(readText(CUR_JOB)||'null'); }catch{}
+        const current = getCurrentJob();
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
         if (current && current.type === 'inventoryQuery') {
           const parsedItems = parseInventorySnapshot(resp);
@@ -335,7 +361,7 @@ app.post(BASE_PATH, (req,res)=>{
           }
         }
         // Limpio current job
-        try{ fs.unlinkSync(CUR_JOB); }catch{}
+        clearCurrentJob();
 
         // 100 => terminado este ciclo
         bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>100</receiveResponseXMLResult></receiveResponseXMLResponse>`;
