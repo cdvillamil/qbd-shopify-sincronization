@@ -316,7 +316,14 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
   try {
     if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
       return res.status(401).send('Invalid HMAC');
-
+    console.log('[WEBHOOK] HIT inventory_levels/update', {
+      ts,
+      len: req.body?.length,
+      topic: req.get('X-Shopify-Topic'),
+      shop: req.get('X-Shopify-Shop-Domain'),
+      ver: req.get('X-Shopify-Api-Version'),
+      ctype: req.get('Content-Type'),
+    });
     const payload = JSON.parse(req.body.toString('utf8'));
     const inventoryLevel =
       payload && typeof payload.inventory_level === 'object' ? payload.inventory_level : null;
