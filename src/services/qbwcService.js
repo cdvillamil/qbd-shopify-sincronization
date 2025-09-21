@@ -193,6 +193,17 @@ function qbwcServiceFactory() {
      */
     receiveResponseXML(args, cb) {
       const xml = args?.response || args?.responseXml || args?.strResponseXML || '';
+      const stamp = new Date().toISOString();
+      const logBlock = [
+        `[${stamp}] [qbwcService] receiveResponseXML qbXML BEGIN`,
+        xml,
+        `[${stamp}] [qbwcService] receiveResponseXML qbXML END`
+      ].join('\n');
+      if (process.stdout && typeof process.stdout.write === 'function') {
+        process.stdout.write(`${logBlock}\n`);
+      } else {
+        console.log(logBlock);
+      }
       save(`last-response-${Date.now()}.xml`, xml);
       save('last-response.xml', xml);
 
