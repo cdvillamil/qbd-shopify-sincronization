@@ -9,6 +9,36 @@ function tagIfValue(tag, value) {
   return `<${tag}>${escapeXml(val)}</${tag}>`;
 }
 
+function renderNested(tag, value) {
+  if (!value || typeof value !== 'object') return '';
+  const inner = Object.entries(value)
+    .map(([childTag, childValue]) => tagIfValue(childTag, childValue))
+    .filter(Boolean)
+    .join('');
+  if (!inner) return '';
+  return `<${tag}>${inner}</${tag}>`;
+}
+
+function renderField(key, value, allFields) {
+  if (key === 'BarCodeValue') {
+    const barCodeValue = tagIfValue('BarCodeValue', value);
+    if (!barCodeValue) return '';
+    const allowOverride = tagIfValue('AllowOverride', allFields.BarCodeAllowOverride);
+    const assignEvenIfUsed = tagIfValue('AssignEvenIfUsed', allFields.BarCodeAssignEvenIfUsed);
+    return `<BarCode>${allowOverride}${assignEvenIfUsed}${barCodeValue}</BarCode>`;
+  }
+
+  if (key === 'BarCodeAllowOverride' || key === 'BarCodeAssignEvenIfUsed') {
+    return '';
+  }
+
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return renderNested(key, value);
+  }
+
+  return tagIfValue(key, value);
+}
+
 function buildItemInventoryModXML({ ListID, EditSequence, fields = {} }, qbxmlVer = process.env.QBXML_VER || '16.0') {
   const listId = ListID || (fields && fields.ListID);
   const editSeq = EditSequence || (fields && fields.EditSequence);
@@ -19,7 +49,7 @@ function buildItemInventoryModXML({ ListID, EditSequence, fields = {} }, qbxmlVe
   delete payloadFields.EditSequence;
 
   const lines = Object.entries(payloadFields)
-    .map(([key, value]) => tagIfValue(key, value))
+    .map(([key, value]) => renderField(key, value, payloadFields))
     .filter(Boolean)
     .join('');
 
