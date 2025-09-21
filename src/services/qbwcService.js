@@ -173,6 +173,7 @@ function qbwcServiceFactory() {
      */
     sendRequestXML(args, cb) {
       const qbxml = buildInventoryQBXML(QB_MAX);
+      console.log('[qbwcService] sendRequestXML qbXML:', qbxml);
       // IMPORTANTE: node-soap se encarga del envelope, aquí solo devolver el QBXML
       cb(null, { sendRequestXMLResult: qbxml });
     },
