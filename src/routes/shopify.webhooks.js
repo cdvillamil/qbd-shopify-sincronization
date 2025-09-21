@@ -46,6 +46,12 @@ function parseMoney(value) {
   return Math.round(num * 100) / 100;
 }
 
+function toNumber(value) {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function toItemRef(item) {
   if (!item || typeof item !== 'object') return null;
   if (item.ListID) return { ListID: item.ListID };
@@ -312,10 +318,16 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       return res.status(401).send('Invalid HMAC');
 
     const payload = JSON.parse(req.body.toString('utf8'));
-    const invItemId = payload?.inventory_item_id;
-    const available = Number(payload?.available);
+    const inventoryLevel =
+      payload && typeof payload.inventory_level === 'object' ? payload.inventory_level : null;
+    const invItemId = payload?.inventory_item_id ?? inventoryLevel?.inventory_item_id;
+    const resolvedAvailable =
+      toNumber(payload?.available) ?? toNumber(inventoryLevel?.available);
+    const resolvedAdjustment =
+      toNumber(payload?.available_adjustment) ?? toNumber(inventoryLevel?.available_adjustment);
 
-    if (!invItemId || Number.isNaN(available)) return res.status(200).send('ok');
+    if (!invItemId) return res.status(200).send('ok');
+    if (resolvedAvailable == null && resolvedAdjustment == null) return res.status(200).send('ok');
 
     // 1) obtener SKU desde inventory_item_id
     const sku = await getInventoryItemSku(invItemId).catch(() => null);
@@ -329,12 +341,41 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
     if (!it) return res.status(200).send('ok');
 
     // 3) calcular delta con respecto a QBD (snapshot)
-    const qbdQoh = Number(it.QuantityOnHand || 0);
-    const delta = available - qbdQoh;
-    if (!delta) return res.status(200).send('ok');
+    const qbdQohRaw = toNumber(it.QuantityOnHand);
+    const qbdQoh = qbdQohRaw == null ? 0 : qbdQohRaw;
+    let newAvailable = resolvedAvailable;
+    if (newAvailable == null && resolvedAdjustment != null) newAvailable = qbdQoh + resolvedAdjustment;
+    const delta =
+      resolvedAdjustment != null
+        ? resolvedAdjustment
+        : newAvailable != null
+        ? newAvailable - qbdQoh
+        : 0;
 
     const itemRef = toItemRef(it);
-    if (!itemRef) return res.status(200).send('ok');
+    if (!itemRef) {
+      return res.status(200).json({
+        ok: true,
+        sku,
+        qbdQoh,
+        available: newAvailable,
+        availableAdjustment: resolvedAdjustment,
+        delta,
+        queued: false,
+      });
+    }
+
+    if (!delta) {
+      return res.status(200).json({
+        ok: true,
+        sku,
+        qbdQoh,
+        available: newAvailable,
+        availableAdjustment: resolvedAdjustment,
+        delta,
+        queued: false,
+      });
+    }
 
     enqueueJob({
       type: 'inventoryAdjust',
@@ -344,7 +385,15 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       createdAt: new Date().toISOString(),
     });
 
-    return res.status(200).json({ ok: true, sku, qbdQoh, available, delta });
+    return res.status(200).json({
+      ok: true,
+      sku,
+      qbdQoh,
+      available: newAvailable,
+      availableAdjustment: resolvedAdjustment,
+      delta,
+      queued: true,
+    });
   } catch (e) {
     console.error('inventory_levels/update webhook error:', e);
     return res.status(500).send('error');
