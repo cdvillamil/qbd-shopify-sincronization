@@ -376,7 +376,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         queued: false,
       });
     }
-
+    console.log('[WEBHOOK] payload parsed', { invItemId, sku, qbdQoh, newAvailable, resolvedAdjustment, delta });
     enqueueJob({
       type: 'inventoryAdjust',
       lines: [{ ...itemRef, QuantityDifference: delta }],
