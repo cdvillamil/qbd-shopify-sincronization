@@ -364,8 +364,11 @@ app.post(BASE_PATH, (req,res)=>{
         // Limpio current job
         clearCurrentJob();
 
-        // 100 => terminado este ciclo
-        bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>100</receiveResponseXMLResult></receiveResponseXMLResponse>`;
+        // Si aún hay trabajos en cola, indica que no hemos terminado para forzar otro ciclo
+        const hasMoreJobs = !!peekJob();
+        const percentDone = hasMoreJobs ? 0 : 100;
+
+        bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>${percentDone}</receiveResponseXMLResult></receiveResponseXMLResponse>`;
       }
       else if (is('getLastError')) {
         bodyXml = `<getLastErrorResponse xmlns="${TNS}"><getLastErrorResult></getLastErrorResult></getLastErrorResponse>`;
