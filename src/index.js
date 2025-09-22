@@ -11,6 +11,7 @@ const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
 const { buildSalesReceiptXML } = require('./services/qbd.salesReceipt');
 const { buildCreditMemoXML } = require('./services/qbd.creditMemo');
 const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
+const { extractStatusSummaries } = require('./services/qbxml.status');
 const {
   readJobs,
   enqueueJob,
@@ -311,6 +312,10 @@ app.post(BASE_PATH, (req,res)=>{
         const now  = Date.now();
         save(`last-response-${now}.xml`, resp);
         save('last-response.xml', resp);
+        const statuses = extractStatusSummaries(resp);
+        if (statuses.length > 0) {
+          console.log('[qbwc] receiveResponseXML status summary:', statuses);
+        }
         //console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
 
         // Leer job actual para decidir parseo

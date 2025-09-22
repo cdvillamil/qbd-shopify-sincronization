@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { extractStatusSummaries } = require('./qbxml.status');
 
 /**
  * OBJETIVO
@@ -203,6 +204,15 @@ function qbwcServiceFactory() {
         process.stdout.write(`${logBlock}\n`);
       } else {
         console.log(logBlock);
+      }
+      const statuses = extractStatusSummaries(xml);
+      if (statuses.length > 0) {
+        const statusLog = `[${stamp}] [qbwcService] receiveResponseXML status summary: ${JSON.stringify(statuses)}`;
+        if (process.stdout && typeof process.stdout.write === 'function') {
+          process.stdout.write(`${statusLog}\n`);
+        } else {
+          console.log(statusLog);
+        }
       }
       save(`last-response-${Date.now()}.xml`, xml);
       save('last-response.xml', xml);
