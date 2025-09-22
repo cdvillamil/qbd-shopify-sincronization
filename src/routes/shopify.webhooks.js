@@ -403,7 +403,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
 // =====================================
 //  C) refunds/create -> CreditMemoAdd
 // =====================================
-router.post('/webhooks/refunds/create', rawJson, (req, res) => {
+/* router.post('/webhooks/refunds/create', rawJson, (req, res) => {
   try {
     if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
       return res.status(401).send('Invalid HMAC');
@@ -508,6 +508,6 @@ router.post('/webhooks/products/update', rawJson, (req, res) => {
     console.error('products/update webhook error:', e);
     return res.status(500).send('error');
   }
-});
+}); */
 
 module.exports = router;
