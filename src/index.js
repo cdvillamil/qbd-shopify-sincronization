@@ -311,7 +311,7 @@ app.post(BASE_PATH, (req,res)=>{
         const now  = Date.now();
         save(`last-response-${now}.xml`, resp);
         save('last-response.xml', resp);
-        console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
+        //console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
 
         // Leer job actual para decidir parseo
         const current = getCurrentJob();
