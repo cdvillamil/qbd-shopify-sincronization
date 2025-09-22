@@ -26,12 +26,37 @@ require('dotenv').config();
 const PORT      = process.env.PORT || 8080;             // En Azure Linux escucha 8080
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LOG_DIR   = process.env.LOG_DIR || '/tmp';
+const LAST_ERROR_FILE = 'last-error.txt';
 const TNS       = 'http://developer.intuit.com/';
 
 function ensureLogDir(){ try{ fs.mkdirSync(LOG_DIR,{recursive:true}); }catch{} }
 function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
+function xmlEscape(txt){
+  if (txt == null) return '';
+  return String(txt)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function clearSaved(name){
+  try {
+    const p = fp(name);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch (e) {
+    console.error('[qbwc] Failed clearing saved file', { name, error: e });
+  }
+}
+function readLastError(){
+  return readText(fp(LAST_ERROR_FILE)) || '';
+}
+function clearLastError(){
+  clearSaved(LAST_ERROR_FILE);
+}
+function persistLastError(text){
+  save(LAST_ERROR_FILE, text || '');
+}
 function sendFileSmart(res, file){
   if(!fs.existsSync(file)) return res.status(404).send('not found');
   const s = fs.readFileSync(file,'utf8');
@@ -315,6 +340,32 @@ app.post(BASE_PATH, (req,res)=>{
         save('last-response.xml', resp);
         //console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
 
+        const hresult = (extract(raw, 'hresult') || '').trim();
+        const message = (extract(raw, 'message') || '').trim();
+        const statusErrors = [];
+        const statusRegex = /<(ItemInventory\w*Rs)\b[^>]*statusCode="([^"\\s]+)"[^>]*>/gi;
+        let statusMatch;
+        while ((statusMatch = statusRegex.exec(resp))) {
+          const [, tagName, codeRaw] = statusMatch;
+          if (codeRaw && codeRaw !== '0') {
+            const statusMessageMatch = statusMatch[0].match(/statusMessage="([^"]*)"/i);
+            statusErrors.push({
+              node: tagName,
+              code: codeRaw,
+              message: statusMessageMatch ? statusMessageMatch[1] : '',
+            });
+          }
+        }
+
+        const errorFragments = [];
+        if (hresult && hresult !== '0') errorFragments.push(`HRESULT: ${hresult}`);
+        if (message) errorFragments.push(`Message: ${message}`);
+        statusErrors.forEach((err) => {
+          const part = [`${err.node} statusCode=${err.code}`];
+          if (err.message) part.push(`statusMessage="${err.message}"`);
+          errorFragments.push(part.join(' '));
+        });
+
         // Leer job actual para decidir parseo
         const current = getCurrentJob();
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
@@ -370,12 +421,40 @@ app.post(BASE_PATH, (req,res)=>{
 
         // Si aún hay trabajos en cola, indica que no hemos terminado para forzar otro ciclo
         const hasMoreJobs = !!peekJob();
-        const percentDone = hasMoreJobs ? 0 : 100;
+        let percentDone = hasMoreJobs ? 0 : 100;
+
+        if (errorFragments.length > 0) {
+          percentDone = -101;
+          const errorText = errorFragments.join('\n');
+          persistLastError(errorText);
+          console.error('[qbwc] receiveResponseXML detected error', {
+            hresult: hresult || null,
+            message: message || null,
+            statusErrors,
+            responseSnippet: resp ? resp.slice(0, 500) : null,
+            persistedErrorText: errorText,
+            percentDone,
+          });
+        } else {
+          if (!hasMoreJobs) {
+            if (readLastError()) {
+              console.log('[qbwc] receiveResponseXML completed without errors, clearing last error state.');
+            }
+            clearLastError();
+          }
+          console.log('[qbwc] receiveResponseXML progress', { percentDone });
+        }
 
         bodyXml = `<receiveResponseXMLResponse xmlns="${TNS}"><receiveResponseXMLResult>${percentDone}</receiveResponseXMLResult></receiveResponseXMLResponse>`;
       }
       else if (is('getLastError')) {
-        bodyXml = `<getLastErrorResponse xmlns="${TNS}"><getLastErrorResult></getLastErrorResult></getLastErrorResponse>`;
+        const lastError = readLastError().trim();
+        if (lastError) {
+          console.error('[qbwc] getLastError returning persisted message:', lastError);
+        } else {
+          console.log('[qbwc] getLastError requested, no error recorded.');
+        }
+        bodyXml = `<getLastErrorResponse xmlns="${TNS}"><getLastErrorResult>${xmlEscape(lastError)}</getLastErrorResult></getLastErrorResponse>`;
       }
       else if (is('closeConnection')) {
         bodyXml = `<closeConnectionResponse xmlns="${TNS}"><closeConnectionResult>OK</closeConnectionResult></closeConnectionResponse>`;
