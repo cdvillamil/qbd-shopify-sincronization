@@ -258,7 +258,7 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
 //  A) pedidos pagados (venta)
 // ============================
 // topic: orders/paid   (también puedes apuntar orders/create si prefieres)
-router.post('/webhooks/orders/paid', rawJson, (req, res) => {
+router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
   try {
     if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
       return res.status(401).send('Invalid HMAC');
@@ -295,7 +295,7 @@ router.post('/webhooks/orders/paid', rawJson, (req, res) => {
     const depositAccountRef = envRef('QBD_SHOPIFY_DEPOSIT_ACCOUNT');
     if (depositAccountRef) jobPayload.depositToAccount = depositAccountRef;
 
-    enqueueJob({
+    await enqueueJob({
       type: 'salesReceiptAdd',
       source: 'shopify-order',
       createdAt: new Date().toISOString(),
@@ -377,7 +377,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       });
     }
     console.log('[WEBHOOK] payload parsed', { invItemId, sku, qbdQoh, newAvailable, resolvedAdjustment, delta });
-    enqueueJob({
+    await enqueueJob({
       type: 'inventoryAdjust',
       lines: [{ ...itemRef, QuantityDifference: delta }],
       account: process.env.QBD_ADJUST_ACCOUNT || undefined,
