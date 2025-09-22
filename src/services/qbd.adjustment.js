@@ -6,12 +6,48 @@ function esc(s) {
   ));
 }
 
+function resolveRef(ref) {
+  if (ref == null) return null;
+  if (typeof ref === 'string') {
+    const str = ref.trim();
+    if (!str) return null;
+    return { tag: 'FullName', value: str };
+  }
+  if (typeof ref !== 'object') return null;
+
+  const listId =
+    ref.ListID ??
+    ref.listId ??
+    ref.listID ??
+    null;
+  if (listId != null && listId !== '') {
+    return { tag: 'ListID', value: String(listId) };
+  }
+
+  const fullName =
+    ref.FullName ??
+    ref.fullName ??
+    ref.Name ??
+    ref.name ??
+    null;
+  if (fullName != null && String(fullName).trim()) {
+    return { tag: 'FullName', value: String(fullName).trim() };
+  }
+
+  return null;
+}
+
+function renderRefBlock(wrapperTag, ref) {
+  const resolved = resolveRef(ref);
+  if (!resolved) return '';
+  return `<${wrapperTag}><${resolved.tag}>${esc(resolved.value)}</${resolved.tag}></${wrapperTag}>`;
+}
+
 function normalizeLine(line) {
   if (!line || typeof line !== 'object') return null;
 
-  const hasListId = line.ListID != null && line.ListID !== '';
-  const rawRef = hasListId ? line.ListID : line.FullName || line.Name;
-  if (!rawRef) return null;
+  const itemRef = renderRefBlock('ItemRef', line);
+  if (!itemRef) return null;
 
   const rawQty =
     line.QuantityDifference ??
@@ -22,16 +58,26 @@ function normalizeLine(line) {
   const qty = Number(rawQty);
   if (!Number.isFinite(qty) || qty === 0) return null;
 
-  const ref = hasListId
-    ? `<ListID>${esc(rawRef)}</ListID>`
-    : `<FullName>${esc(rawRef)}</FullName>`;
+  const parts = [itemRef];
+
+  const siteRefBlock = renderRefBlock('InventorySiteRef', line.InventorySiteRef);
+  if (siteRefBlock) parts.push(siteRefBlock);
+
+  const siteLocationBlock = renderRefBlock(
+    'InventorySiteLocationRef',
+    line.InventorySiteLocationRef
+  );
+  if (siteLocationBlock) parts.push(siteLocationBlock);
+
+  parts.push(
+    `<QuantityAdjustment>
+          <QuantityDifference>${qty}</QuantityDifference>
+        </QuantityAdjustment>`
+  );
 
   return `
       <InventoryAdjustmentLineAdd>
-        <ItemRef>${ref}</ItemRef>
-        <QuantityAdjustment>
-          <QuantityDifference>${qty}</QuantityDifference>
-        </QuantityAdjustment>
+        ${parts.join('\n        ')}
       </InventoryAdjustmentLineAdd>`;
 }
 

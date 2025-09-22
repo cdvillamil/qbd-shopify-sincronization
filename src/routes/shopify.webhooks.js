@@ -68,6 +68,131 @@ function envRef(base, fallbackFullName) {
   return null;
 }
 
+let cachedLocationSiteMap = null;
+
+function normalizeSiteRef(ref) {
+  if (ref == null) return null;
+  if (typeof ref === 'string') {
+    const str = ref.trim();
+    return str ? { FullName: str } : null;
+  }
+  if (typeof ref !== 'object') return null;
+
+  const listId =
+    ref.ListID ??
+    ref.listId ??
+    ref.listID ??
+    null;
+  if (listId != null && listId !== '') {
+    return { ListID: String(listId) };
+  }
+
+  const fullName =
+    ref.FullName ??
+    ref.fullName ??
+    ref.Name ??
+    ref.name ??
+    null;
+  if (fullName != null && String(fullName).trim()) {
+    return { FullName: String(fullName).trim() };
+  }
+
+  return null;
+}
+
+function normalizeSiteEntry(entry) {
+  if (entry == null) return null;
+  if (typeof entry !== 'object' || Array.isArray(entry)) {
+    const siteRef = normalizeSiteRef(entry);
+    return siteRef ? { InventorySiteRef: siteRef } : null;
+  }
+
+  const normalized = {};
+
+  const siteRef =
+    normalizeSiteRef(entry.InventorySiteRef) ||
+    normalizeSiteRef(entry.site) ||
+    normalizeSiteRef(entry.Site) ||
+    normalizeSiteRef(entry.inventorySite) ||
+    normalizeSiteRef(entry.siteRef);
+  if (siteRef) normalized.InventorySiteRef = siteRef;
+
+  const siteLocationRef =
+    normalizeSiteRef(entry.InventorySiteLocationRef) ||
+    normalizeSiteRef(entry.location) ||
+    normalizeSiteRef(entry.siteLocation) ||
+    normalizeSiteRef(entry.locationRef);
+  if (siteLocationRef) normalized.InventorySiteLocationRef = siteLocationRef;
+
+  if (!Object.keys(normalized).length) {
+    const direct = normalizeSiteRef(entry);
+    if (direct) normalized.InventorySiteRef = direct;
+  }
+
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function loadLocationSiteMap() {
+  if (cachedLocationSiteMap) return cachedLocationSiteMap;
+
+  const rawEnv =
+    process.env.SHOPIFY_QBD_SITE_MAP ||
+    process.env.SHOPIFY_LOCATION_SITE_MAP ||
+    process.env.SHOPIFY_TO_QBD_SITE_MAP;
+
+  if (!rawEnv) {
+    cachedLocationSiteMap = {};
+    return cachedLocationSiteMap;
+  }
+
+  let parsed;
+  try {
+    parsed = typeof rawEnv === 'string' ? JSON.parse(rawEnv) : rawEnv;
+  } catch (err) {
+    console.warn(
+      '[shopify.webhooks] Invalid SHOPIFY_QBD_SITE_MAP configuration:',
+      err?.message || err
+    );
+    cachedLocationSiteMap = {};
+    return cachedLocationSiteMap;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.warn('[shopify.webhooks] SHOPIFY_QBD_SITE_MAP must be a JSON object map.');
+    cachedLocationSiteMap = {};
+    return cachedLocationSiteMap;
+  }
+
+  const normalized = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    const siteEntry = normalizeSiteEntry(value);
+    if (!siteEntry) continue;
+    normalized[String(key)] = siteEntry;
+  }
+
+  cachedLocationSiteMap = normalized;
+  return cachedLocationSiteMap;
+}
+
+function resolveInventorySite(locationId) {
+  if (locationId == null) return null;
+  const siteMap = loadLocationSiteMap();
+  if (!siteMap || typeof siteMap !== 'object') return null;
+
+  const entry = siteMap[String(locationId)];
+  if (!entry) return null;
+
+  const result = {};
+  if (entry.InventorySiteRef) {
+    result.InventorySiteRef = { ...entry.InventorySiteRef };
+  }
+  if (entry.InventorySiteLocationRef) {
+    result.InventorySiteLocationRef = { ...entry.InventorySiteLocationRef };
+  }
+
+  return Object.keys(result).length ? result : null;
+}
+
 function mapAddress(addr) {
   if (!addr || typeof addr !== 'object') return null;
   const lines = [];
@@ -352,6 +477,14 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         ? newAvailable - qbdQoh
         : 0;
 
+    const locationId =
+      payload?.location_id ??
+      inventoryLevel?.location_id ??
+      payload?.locationId ??
+      null;
+
+    const siteInfo = resolveInventorySite(locationId);
+
     const itemRef = toItemRef(it);
     if (!itemRef) {
       return res.status(200).json({
@@ -376,10 +509,24 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         queued: false,
       });
     }
-    console.log('[WEBHOOK] payload parsed', { invItemId, sku, qbdQoh, newAvailable, resolvedAdjustment, delta });
+    console.log('[WEBHOOK] payload parsed', {
+      invItemId,
+      sku,
+      qbdQoh,
+      newAvailable,
+      resolvedAdjustment,
+      delta,
+      locationId,
+      siteInfo,
+    });
+    const line = { ...itemRef, QuantityDifference: delta };
+    if (siteInfo?.InventorySiteRef) line.InventorySiteRef = { ...siteInfo.InventorySiteRef };
+    if (siteInfo?.InventorySiteLocationRef)
+      line.InventorySiteLocationRef = { ...siteInfo.InventorySiteLocationRef };
+
     enqueueJob({
       type: 'inventoryAdjust',
-      lines: [{ ...itemRef, QuantityDifference: delta }],
+      lines: [line],
       account: process.env.QBD_ADJUST_ACCOUNT || undefined,
       source: 'shopify-inventory-level',
       createdAt: new Date().toISOString(),
