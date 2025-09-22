@@ -55,7 +55,9 @@ function envelope(body){
 }
 
 /* ===== Cola de trabajos (persistida en /tmp) ===== */
-function enqueue(job){ enqueueJob(job); }
+async function enqueue(job){
+  return enqueueJob(job);
+}
 
 /* Generar QBXML según el job */
 function qbxmlFor(job) {
@@ -178,7 +180,7 @@ app.get('/debug/last-response', (req, res) => sendFileSmart(res, fp('last-respon
 
 /* Nueva cola: ver y sembrar */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
-app.get('/debug/seed-inventory', (req,res)=>{
+app.get('/debug/seed-inventory', async (req,res)=>{
   const job = { type:'inventoryQuery', ts:new Date().toISOString() };
   const rawMax = req.query.max;
   if (rawMax != null) {
@@ -188,7 +190,7 @@ app.get('/debug/seed-inventory', (req,res)=>{
       job.respectMax = true;
     }
   }
-  enqueue(job);
+  await enqueue(job);
   res.json({ ok:true, queued:job });
 });
 app.get('/debug/inventory', (req,res)=>{
@@ -214,7 +216,7 @@ app.get(BASE_PATH, (req,res,next)=>{
 app.post(BASE_PATH, (req,res)=>{
   let raw=''; req.setEncoding('utf8');
   req.on('data', c=>{ raw+=c; });
-  req.on('end', ()=>{
+  req.on('end', async () => {
     try{
       save('last-post-body.xml', raw);
 
@@ -237,10 +239,10 @@ app.post(BASE_PATH, (req,res)=>{
 
         // justo después de calcular ok=true en authenticate:
         if (ok && process.env.AUTO_SEED_ON_AUTH === 'true') {
-          enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
+          await enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
         }
         if (process.env.AUTO_ENQUEUE_INVENTORY_QUERY === 'true') {
-          enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
+          await enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
         }
 
 
@@ -290,13 +292,13 @@ app.post(BASE_PATH, (req,res)=>{
         while (job) {
           qbxml = qbxmlFor(job);
           if (qbxml) break;
-          popJob();
+          await popJob();
           job = peekJob();
         }
 
         if (job && qbxml) {
           setCurrentJob(job);
-          popJob();
+          await popJob();
           save('last-request-qbxml.xml', qbxml);
           console.log('[qbwc] sendRequestXML QBXML payload:', qbxml);
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;

@@ -6,6 +6,8 @@ const path = require('path');
 const LOG_DIR = process.env.LOG_DIR || '/tmp';
 const JOBS_FILE = path.join(LOG_DIR, 'jobs.json');
 const CURRENT_JOB_FILE = path.join(LOG_DIR, 'current-job.json');
+const JOBS_LOCK_DIR = path.join(LOG_DIR, 'jobs.lock');
+const JOBS_LOCK_RETRY_MS = 25;
 
 function ensureDir() {
   try {
@@ -45,12 +47,67 @@ function writeJobs(list) {
   writeJson(JOBS_FILE, Array.isArray(list) ? list : []);
 }
 
-function enqueueJob(job) {
-  if (!job || typeof job !== 'object') return readJobs().length;
-  const jobs = readJobs();
-  jobs.push(job);
-  writeJobs(jobs);
-  return jobs.length;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withJobsLock(mutator) {
+  if (typeof mutator !== 'function') {
+    throw new TypeError('withJobsLock requires a mutator function');
+  }
+
+  for (;;) {
+    ensureDir();
+    try {
+      fs.mkdirSync(JOBS_LOCK_DIR);
+      break;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') {
+        try {
+          const stat = fs.statSync(JOBS_LOCK_DIR);
+          if (!stat.isDirectory()) {
+            fs.rmSync(JOBS_LOCK_DIR, { force: true, recursive: true });
+            continue;
+          }
+        } catch (innerErr) {
+          if (innerErr && innerErr.code === 'ENOENT') {
+            continue;
+          }
+          if (process.env.DEBUG_JOB_QUEUE) {
+            console.warn('[jobQueue] lock stat error:', innerErr.message || innerErr);
+          }
+        }
+        await sleep(JOBS_LOCK_RETRY_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  try {
+    const jobs = readJobs();
+    const result = await mutator(jobs);
+    writeJobs(jobs);
+    return result;
+  } finally {
+    try {
+      fs.rmSync(JOBS_LOCK_DIR, { recursive: true, force: true });
+    } catch (err) {
+      if (err && err.code !== 'ENOENT' && process.env.DEBUG_JOB_QUEUE) {
+        console.warn('[jobQueue] lock release error:', err.message || err);
+      }
+    }
+  }
+}
+
+async function enqueueJob(job) {
+  return withJobsLock(async (jobs) => {
+    if (!job || typeof job !== 'object') {
+      return jobs.length;
+    }
+    jobs.push(job);
+    return jobs.length;
+  });
 }
 
 function peekJob() {
@@ -58,12 +115,12 @@ function peekJob() {
   return jobs.length ? jobs[0] : null;
 }
 
-function popJob() {
-  const jobs = readJobs();
-  if (!jobs.length) return null;
-  const [first, ...rest] = jobs;
-  writeJobs(rest);
-  return first || null;
+async function popJob() {
+  return withJobsLock(async (jobs) => {
+    if (!jobs.length) return null;
+    const first = jobs.shift();
+    return first || null;
+  });
 }
 
 function setCurrentJob(job) {
@@ -97,6 +154,7 @@ module.exports = {
   ensureDir,
   readJobs,
   writeJobs,
+  withJobsLock,
   enqueueJob,
   peekJob,
   popJob,
