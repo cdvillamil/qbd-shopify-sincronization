@@ -298,6 +298,7 @@ app.post(BASE_PATH, (req,res)=>{
           setCurrentJob(job);
           popJob();
           save('last-request-qbxml.xml', qbxml);
+          console.log('[qbwc] sendRequestXML QBXML payload:', qbxml);
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;
         } else {
           // Cola vacía -> retornar cadena vacía
@@ -310,6 +311,7 @@ app.post(BASE_PATH, (req,res)=>{
         const now  = Date.now();
         save(`last-response-${now}.xml`, resp);
         save('last-response.xml', resp);
+        console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
 
         // Leer job actual para decidir parseo
         const current = getCurrentJob();
