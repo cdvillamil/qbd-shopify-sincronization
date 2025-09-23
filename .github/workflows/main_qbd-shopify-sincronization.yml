@@ -16,9 +16,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 🔧 Evita "fatal: detected dubious ownership in repository"
+      - name: Git safe.directory (self-hosted Windows)
+        shell: powershell
+        run: |
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
+
       # Crea un ZIP solo con archivos versionados (sin node_modules)
       - name: Create source ZIP (git archive)
         shell: powershell
+        working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
           if (Test-Path app.zip) { Remove-Item app.zip -Force }
@@ -26,7 +33,6 @@ jobs:
 
           # Verificaciones rápidas
           if (-not (Test-Path "package.json")) { Write-Error "No existe package.json en el repo." }
-          # Opcional: asegurar que subiste el lockfile para builds deterministas
           if (-not (Test-Path "package-lock.json")) { Write-Warning "No hay package-lock.json committeado. Azure hará 'npm install' en vez de 'npm ci'." }
 
       - name: Upload artifact
