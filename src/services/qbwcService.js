@@ -4,13 +4,14 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
 
 /**
  * OBJETIVO
  * - Mantener authenticate EXACTO (usuario/contraseña desde variables de entorno).
  * - Implementar sendRequestXML para que SIEMPRE devuelva un QBXML de inventario (pull bajo demanda en cada corrida).
  * - Implementar receiveResponseXML para parsear ItemInventory, ItemInventoryAssembly y (si aplica) ItemSites (Advanced Inventory).
- * - Guardar archivos de depuración en /tmp para validar fácilmente desde tus endpoints actuales (/debug/*).
+ * - Guardar archivos de depuración en LOG_DIR para validar fácilmente desde tus endpoints actuales (/debug/*).
  *
  * No agrega dependencias y no requiere cambios en index.js ni en el WSDL.
  */
@@ -18,7 +19,6 @@ const crypto = require('crypto');
 /* =========================
    Configuración y helpers
    ========================= */
-const LOG_DIR = process.env.LOG_DIR || '/tmp';
 const HAS_ADV_INV = (process.env.HAS_ADV_INV || '').toString() === '1'; // 1 si tu QBD tiene Advanced Inventory
 const QB_MAX = Number(process.env.QB_MAX || 200) || 200;                // límite de ítems a pedir en cada tipo
 const TNS = 'http://developer.intuit.com/';
@@ -26,8 +26,7 @@ const TNS = 'http://developer.intuit.com/';
 const APP_USER = process.env.WC_USERNAME || '';
 const APP_PASS = process.env.WC_PASSWORD || '';
 
-function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch { /* noop */ } }
-function save(name, txt) { ensureDir(LOG_DIR); fs.writeFileSync(path.join(LOG_DIR, name), txt ?? '', 'utf8'); }
+function save(name, txt) { ensureLogDir(); fs.writeFileSync(path.join(LOG_DIR, name), txt ?? '', 'utf8'); }
 function read(name) { try { return fs.readFileSync(path.join(LOG_DIR, name), 'utf8'); } catch { return null; } }
 function sha256(s) { return crypto.createHash('sha256').update(s || '').digest('hex'); }
 
@@ -189,7 +188,7 @@ function qbwcServiceFactory() {
     },
 
     /**
-     * Recibe la respuesta QBXML, la guarda y la parsea a JSON consolidado en /tmp/last-inventory.json
+     * Recibe la respuesta QBXML, la guarda y la parsea a JSON consolidado en LOG_DIR/last-inventory.json
      */
     receiveResponseXML(args, cb) {
       const xml = args?.response || args?.responseXml || args?.strResponseXML || '';

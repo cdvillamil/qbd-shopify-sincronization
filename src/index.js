@@ -19,17 +19,17 @@ const {
   setCurrentJob,
   getCurrentJob,
   clearCurrentJob,
+  LOG_DIR,
+  ensureDir: ensureLogDir,
 } = require('./services/jobQueue');
 require('dotenv').config();
 
 /* ===== Config ===== */
 const PORT      = process.env.PORT || 8080;             // En Azure Linux escucha 8080
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
-const LOG_DIR   = process.env.LOG_DIR || '/tmp';
 const LAST_ERROR_FILE = 'last-error.txt';
 const TNS       = 'http://developer.intuit.com/';
 
-function ensureLogDir(){ try{ fs.mkdirSync(LOG_DIR,{recursive:true}); }catch{} }
 function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
@@ -79,7 +79,7 @@ function envelope(body){
          `<soap:Body>${body}</soap:Body></soap:Envelope>`;
 }
 
-/* ===== Cola de trabajos (persistida en /tmp) ===== */
+/* ===== Cola de trabajos (persistida en LOG_DIR) ===== */
 async function enqueue(job){
   return enqueueJob(job);
 }
