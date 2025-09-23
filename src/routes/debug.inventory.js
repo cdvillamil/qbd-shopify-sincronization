@@ -4,9 +4,10 @@ const path = require('path');
 const express = require('express');
 const router = express.Router();
 
-const TMP_DIR = '/tmp';
-const SNAP_PATH = path.join(TMP_DIR, 'last-inventory.json');
-const LAST_RESP = path.join(TMP_DIR, 'last-response.xml');
+const { LOG_DIR, ensureDir: ensureLogDir } = require('../services/jobQueue');
+
+const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
+const LAST_RESP = path.join(LOG_DIR, 'last-response.xml');
 
 // ---------- utils ----------
 function read(file) {
@@ -56,13 +57,14 @@ function parseInventory(xml) {
   return items;
 }
 
-// Devuelve el último XML en /tmp que contenga inventario
+// Devuelve el último XML en LOG_DIR que contenga inventario
 function pickLatestInventoryXml() {
   let files = [];
   try {
-    files = fs.readdirSync(TMP_DIR)
+    ensureLogDir();
+    files = fs.readdirSync(LOG_DIR)
       .filter(n => n.endsWith('.xml'))
-      .map(n => path.join(TMP_DIR, n))
+      .map(n => path.join(LOG_DIR, n))
       .sort((a, b) => {
         try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
       });
@@ -89,13 +91,14 @@ function pickLatestInventoryXml() {
 
 // ---------- routes ----------
 
-// Lista lo que hay en /tmp y cuenta ítems por XML
+// Lista lo que hay en LOG_DIR y cuenta ítems por XML
 router.get('/scan-xml', (_req, res) => {
   let out = [];
   try {
-    const files = fs.readdirSync(TMP_DIR)
+    ensureLogDir();
+    const files = fs.readdirSync(LOG_DIR)
       .filter(n => n.endsWith('.xml'))
-      .map(n => path.join(TMP_DIR, n))
+      .map(n => path.join(LOG_DIR, n))
       .sort((a, b) => {
         try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
       });
@@ -130,6 +133,7 @@ router.get('/inventory', (req, res) => {
   const persist = /^(1|true|yes)$/i.test(String(req.query.persist || ''));
   if (persist) {
     if (items.length > 0) {
+      ensureLogDir();
       fs.writeFileSync(SNAP_PATH, JSON.stringify({ count: items.length, items }, null, 2), 'utf8');
       payload.persisted = SNAP_PATH;
     } else {

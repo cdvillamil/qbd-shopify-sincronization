@@ -2,14 +2,14 @@
 const fs = require('fs');
 const path = require('path');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
+const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
   ? fetch
   : (...args) => import('node-fetch').then(m => m.default(...args));
 
-const TMP_DIR = '/tmp';
-const SNAP_PATH = path.join(TMP_DIR, 'last-inventory.json');
-const LAST_PUSH_PATH = path.join(TMP_DIR, 'shopify-last-pushed.json');
+const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
+const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
 
 // --- Debug helpers ---
 const DEBUG = /^(1|true|yes)$/i.test(process.env.SHOPIFY_SYNC_DEBUG || '');
@@ -95,6 +95,7 @@ function loadSnapshot() {
 }
 function saveLastPush(plan) {
   const payload = { pushedAt: new Date().toISOString(), ...plan };
+  ensureLogDir();
   fs.writeFileSync(LAST_PUSH_PATH, JSON.stringify(payload, null, 2), 'utf8');
   return payload;
 }
