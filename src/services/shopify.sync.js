@@ -8,6 +8,23 @@ const _fetch = (typeof fetch === 'function')
   ? fetch
   : (...args) => import('node-fetch').then(m => m.default(...args));
 
+const GQL_MAX_THROTTLE_RETRIES = (() => {
+  const n = Number(process.env.SHOPIFY_GQL_THROTTLE_RETRIES);
+  return Number.isFinite(n) && n >= 0 ? n : 5;
+})();
+const GQL_BASE_THROTTLE_DELAY_MS = (() => {
+  const n = Number(process.env.SHOPIFY_GQL_THROTTLE_BASE_DELAY_MS);
+  return Number.isFinite(n) && n > 0 ? n : 750;
+})();
+const GQL_MAX_THROTTLE_DELAY_MS = (() => {
+  const n = Number(process.env.SHOPIFY_GQL_THROTTLE_MAX_DELAY_MS);
+  return Number.isFinite(n) && n > 0 ? n : 5_000;
+})();
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms || 0)));
+}
+
 const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
 const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
 
@@ -19,20 +36,44 @@ function dbg(...args) { if (DEBUG) console.log('[sync]', ...args); }
 // === Shopify GraphQL helpers ===
 async function shopifyGraphQL(query) {
   const url = `https://${process.env.SHOPIFY_STORE}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`;
-  const r = await _fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN,
-    },
-    body: JSON.stringify({ query }),
-  });
 
-  const json = await r.json().catch(() => ({}));
-  if (!r.ok || json?.errors) {
-    throw new Error(`Shopify GraphQL ${r.status}: ${JSON.stringify(json.errors || json)}`);
+  let attempt = 0;
+  while (true) {
+    attempt += 1;
+    const r = await _fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const json = await r.json().catch(() => ({}));
+    const errors = Array.isArray(json?.errors) ? json.errors : [];
+    const throttled = (r.status === 429)
+      || errors.some(err => {
+        const code = err?.extensions?.code || '';
+        const message = err?.message || '';
+        return String(code).toUpperCase() === 'THROTTLED' || /throttled/i.test(message);
+      });
+
+    if (!r.ok || errors.length > 0) {
+      if (throttled && attempt <= GQL_MAX_THROTTLE_RETRIES) {
+        const retryAfterHeader = Number(r.headers?.get?.('Retry-After'));
+        const waitMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+          ? Math.round(retryAfterHeader * 1000)
+          : Math.min(GQL_MAX_THROTTLE_DELAY_MS, GQL_BASE_THROTTLE_DELAY_MS * (2 ** (attempt - 1)));
+        dbg('shopifyGraphQL throttled, retrying', { attempt, waitMs });
+        await sleep(waitMs);
+        continue;
+      }
+
+      throw new Error(`Shopify GraphQL ${r.status}: ${JSON.stringify(json.errors || json)}`);
+    }
+
+    return json.data;
   }
-  return json.data;
 }
 
 // Devuelve { variant_id, inventory_item_id, sku } o null
