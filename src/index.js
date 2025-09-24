@@ -33,6 +33,15 @@ const TNS       = 'http://developer.intuit.com/';
 function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
+function readJsonSafe(name){
+  try {
+    const raw = readText(fp(name));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('[inventory] Failed to parse snapshot JSON', { name, error: err?.message || err });
+    return null;
+  }
+}
 function xmlEscape(txt){
   if (txt == null) return '';
   return String(txt)
@@ -154,6 +163,86 @@ function parseQBDate(value){
 
 function pickRelevantTimestamp(item){
   return item?.TimeModified || item?.TimeCreated || null;
+}
+
+function pickListId(item){
+  if (!item) return null;
+  if (item.ListID != null) return String(item.ListID);
+  if (item.ListId != null) return String(item.ListId);
+  return null;
+}
+
+function buildSnapshotIndex(snapshot){
+  const map = new Map();
+  if (!snapshot) return map;
+
+  const add = (items) => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      const id = pickListId(item);
+      if (!id) continue;
+
+      const current = map.get(id);
+      if (!current) {
+        map.set(id, item);
+        continue;
+      }
+
+      const currentTs = parseQBDate(pickRelevantTimestamp(current));
+      const candidateTs = parseQBDate(pickRelevantTimestamp(item));
+      if (!currentTs || (candidateTs && candidateTs > currentTs)) {
+        map.set(id, item);
+      }
+    }
+  };
+
+  add(snapshot.items);
+  add(snapshot.allItems);
+  return map;
+}
+
+function filterUnchangedSnapshotItems(items, previousSnapshot){
+  const previousMap = buildSnapshotIndex(previousSnapshot);
+  if (!Array.isArray(items) || previousMap.size === 0) {
+    return { filtered: Array.isArray(items) ? [...items] : [], skipped: 0 };
+  }
+
+  const filtered = [];
+  let skipped = 0;
+
+  for (const item of items) {
+    const id = pickListId(item);
+    if (!id) {
+      filtered.push(item);
+      continue;
+    }
+
+    const prev = previousMap.get(id);
+    if (!prev) {
+      filtered.push(item);
+      continue;
+    }
+
+    const prevQty = Number(prev.QuantityOnHand);
+    const nextQty = Number(item?.QuantityOnHand);
+    const sameQty = Number.isFinite(prevQty) && Number.isFinite(nextQty) && prevQty === nextQty;
+
+    if (sameQty) {
+      skipped += 1;
+      continue;
+    }
+
+    const prevTs = parseQBDate(pickRelevantTimestamp(prev));
+    const nextTs = parseQBDate(pickRelevantTimestamp(item));
+    if (prevTs && nextTs && nextTs <= prevTs) {
+      skipped += 1;
+      continue;
+    }
+
+    filtered.push(item);
+  }
+
+  return { filtered, skipped };
 }
 
 function filterInventoryForToday(items, now = new Date()){
@@ -370,10 +459,13 @@ app.post(BASE_PATH, (req,res)=>{
         const current = getCurrentJob();
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
         if (current && current.type === 'inventoryQuery') {
+          const previousSnapshot = readJsonSafe('last-inventory.json');
           const parsedItems = parseInventorySnapshot(resp);
           const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
+          const { filtered: recentItems, skipped: unchangedSkipped } =
+            filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
           const snapshotPayload = {
-            count: todaysItems.length,
+            count: recentItems.length,
             filteredAt: new Date().toISOString(),
             filter: {
               mode: 'TimeModifiedSameDay',
@@ -382,14 +474,19 @@ app.post(BASE_PATH, (req,res)=>{
               endExclusive: end.toISOString(),
               sourceCount: parsedItems.length,
             },
-            items: todaysItems,
+            items: recentItems,
             allItems: parsedItems,
+            skipped: {
+              unchanged: unchangedSkipped,
+              previousSnapshotItems: previousSnapshot?.items?.length || 0,
+            },
           };
 
           save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));
           console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
-            kept: todaysItems.length,
+            kept: recentItems.length,
+            skippedUnchanged: unchangedSkipped,
             start: start.toISOString(),
             end: end.toISOString(),
           });
@@ -404,7 +501,7 @@ app.post(BASE_PATH, (req,res)=>{
               console.warn('Auto-push skipped due to QuickBooks error status.');
             }
 
-            if (auto && ok && todaysItems.length > 0) {
+            if (auto && ok && recentItems.length > 0) {
               const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
               if (isSyncLocked()) {
                 console.log('Auto-push skipped: Shopify sync already running.');
@@ -419,7 +516,7 @@ app.post(BASE_PATH, (req,res)=>{
                   })
                 );
               }
-            } else if (auto && todaysItems.length === 0) {
+            } else if (auto && recentItems.length === 0) {
               console.log('Auto-push skipped: no inventory changes detected for today.');
             }
           } catch (e) {
