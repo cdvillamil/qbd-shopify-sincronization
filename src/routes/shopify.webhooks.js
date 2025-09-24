@@ -33,8 +33,18 @@ function skuFields() {
 // --- Helpers ---
 function verifyHmac(secret, rawBody, hmacHeader) {
   if (!secret) return true; // si no hay secreto, no bloquear en dev
-  const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(hmacHeader || '', 'utf8'));
+
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  const provided = typeof hmacHeader === 'string' ? hmacHeader.trim() : '';
+
+  if (!provided) return false;
+
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const providedBuf = Buffer.from(provided, 'utf8');
+
+  if (expectedBuf.length !== providedBuf.length) return false;
+
+  return crypto.timingSafeEqual(expectedBuf, providedBuf);
 }
 
 const rawJson = express.raw({ type: 'application/json' });
