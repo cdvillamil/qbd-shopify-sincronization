@@ -34,12 +34,55 @@ function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
 function readJsonSafe(name){
+  const target = fp(name);
   try {
-    const raw = readText(fp(name));
-    return raw ? JSON.parse(raw) : null;
+    const raw = readText(target);
+    if (raw) return JSON.parse(raw);
   } catch (err) {
-    console.warn('[inventory] Failed to parse snapshot JSON', { name, error: err?.message || err });
-    return null;
+    console.warn('[inventory] Failed to parse JSON', { name, error: err?.message || err });
+  }
+
+  const backupPath = `${target}.bak`;
+  try {
+    const backupRaw = readText(backupPath);
+    if (backupRaw) {
+      console.warn('[inventory] Using backup JSON due to parse failure', { name, backup: `${name}.bak` });
+      return JSON.parse(backupRaw);
+    }
+  } catch (err) {
+    console.warn('[inventory] Failed to parse backup JSON', { name: `${name}.bak`, error: err?.message || err });
+  }
+
+  return null;
+}
+
+function saveJsonAtomic(name, value, { backup = true } = {}){
+  const target = fp(name);
+  const tmpPath = `${target}.tmp`;
+  const backupPath = `${target}.bak`;
+  const payload = JSON.stringify(value ?? null, null, 2);
+
+  ensureLogDir();
+
+  if (backup) {
+    try {
+      if (fs.existsSync(target)) {
+        fs.copyFileSync(target, backupPath);
+      }
+    } catch (err) {
+      console.warn('[inventory] Failed to snapshot backup before write', { name, error: err?.message || err });
+    }
+  }
+
+  fs.writeFileSync(tmpPath, payload, 'utf8');
+  fs.renameSync(tmpPath, target);
+
+  if (backup) {
+    try {
+      fs.copyFileSync(target, backupPath);
+    } catch (err) {
+      console.warn('[inventory] Failed to refresh JSON backup', { name, error: err?.message || err });
+    }
   }
 }
 function xmlEscape(txt){
@@ -176,28 +219,43 @@ function buildSnapshotIndex(snapshot){
   const map = new Map();
   if (!snapshot) return map;
 
-  const add = (items) => {
+  const add = (items, { pending = false, source = null } = {}) => {
     if (!Array.isArray(items)) return;
     for (const item of items) {
       const id = pickListId(item);
       if (!id) continue;
 
-      const current = map.get(id);
-      if (!current) {
-        map.set(id, item);
+      const entry = map.get(id);
+      const candidateTs = parseQBDate(pickRelevantTimestamp(item));
+      const candidate = { item, pending: Boolean(pending), source };
+
+      if (!entry) {
+        map.set(id, candidate);
         continue;
       }
 
-      const currentTs = parseQBDate(pickRelevantTimestamp(current));
-      const candidateTs = parseQBDate(pickRelevantTimestamp(item));
-      if (!currentTs || (candidateTs && candidateTs > currentTs)) {
-        map.set(id, item);
+      const entryTs = parseQBDate(pickRelevantTimestamp(entry.item));
+      const mergedPending = entry.pending || candidate.pending;
+      let useCandidate = false;
+
+      if (candidate.pending && !entry.pending) {
+        useCandidate = true;
+      } else if (!entryTs) {
+        useCandidate = true;
+      } else if (candidateTs && candidateTs > entryTs) {
+        useCandidate = true;
+      }
+
+      if (useCandidate) {
+        map.set(id, { item, pending: mergedPending, source: source || entry.source || null });
+      } else if (mergedPending !== entry.pending) {
+        map.set(id, { ...entry, pending: mergedPending });
       }
     }
   };
 
-  add(snapshot.items);
-  add(snapshot.allItems);
+  add(snapshot.allItems, { pending: false, source: 'allItems' });
+  add(snapshot.items, { pending: true, source: 'items' });
   return map;
 }
 
@@ -217,13 +275,19 @@ function filterUnchangedSnapshotItems(items, previousSnapshot){
       continue;
     }
 
-    const prev = previousMap.get(id);
-    if (!prev) {
+    const prevEntry = previousMap.get(id);
+    if (!prevEntry) {
       filtered.push(item);
       continue;
     }
 
-    const prevQty = Number(prev.QuantityOnHand);
+    if (prevEntry.pending) {
+      filtered.push(item);
+      continue;
+    }
+
+    const prev = prevEntry.item;
+    const prevQty = Number(prev?.QuantityOnHand);
     const nextQty = Number(item?.QuantityOnHand);
     const sameQty = Number.isFinite(prevQty) && Number.isFinite(nextQty) && prevQty === nextQty;
 
@@ -482,7 +546,7 @@ app.post(BASE_PATH, (req,res)=>{
             },
           };
 
-          save('last-inventory.json', JSON.stringify(snapshotPayload, null, 2));
+          saveJsonAtomic('last-inventory.json', snapshotPayload);
           console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
             kept: recentItems.length,

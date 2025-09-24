@@ -27,6 +27,8 @@ function sleep(ms) {
 }
 
 const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
+const SNAP_BAK_PATH = `${SNAP_PATH}.bak`;
+const SNAP_TMP_PATH = `${SNAP_PATH}.tmp`;
 const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
 const LOCK_PATH = path.join(LOG_DIR, 'shopify-sync.lock');
 const LOCK_ERROR_CODE = 'SHOPIFY_SYNC_LOCKED';
@@ -114,27 +116,81 @@ function pickSku(it, fields) {
 }
 
 // --- Snapshot helpers ---
+function readSnapshotFrom(pathname) {
+  try {
+    if (!fs.existsSync(pathname)) return null;
+    const raw = fs.readFileSync(pathname, 'utf8');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    if (DEBUG) {
+      console.warn('[sync] snapshot read error:', { path: pathname, error: err?.message || err });
+    }
+    return null;
+  }
+}
+
 function loadSnapshot() {
-  if (!fs.existsSync(SNAP_PATH)) {
+  let snapshot = readSnapshotFrom(SNAP_PATH);
+  if (!snapshot) {
+    snapshot = readSnapshotFrom(SNAP_BAK_PATH);
+    if (snapshot) {
+      console.warn('[sync] snapshot primary missing/corrupt, using backup');
+    }
+  }
+
+  if (!snapshot) {
     dbg('snapshot not found at', SNAP_PATH);
     return { items: [] };
   }
+
+  const count = Array.isArray(snapshot.items) ? snapshot.items.length : 0;
+  dbg('snapshot loaded:', { count, path: SNAP_PATH });
+  if (DEBUG && count > 0) {
+    const sample = snapshot.items.slice(0, Math.min(LOG_N, count)).map(x => ({
+      Name: x.Name, BarCodeValue: x.BarCodeValue, ListID: x.ListID, QOH: x.QuantityOnHand
+    }));
+    dbg('snapshot sample (first ' + sample.length + '):', sample);
+  }
+
+  return snapshot;
+}
+
+function writeSnapshotFile(value) {
+  ensureLogDir();
+  const payload = JSON.stringify(value ?? { items: [] }, null, 2);
+
   try {
-    const raw = fs.readFileSync(SNAP_PATH, 'utf8');
-    const j = JSON.parse(raw) || { items: [] };
-    const count = Array.isArray(j.items) ? j.items.length : 0;
-    dbg('snapshot loaded:', { count, path: SNAP_PATH });
-    if (DEBUG && count > 0) {
-      // Muestra algunos ejemplos de campos para validar mapeos
-      const sample = j.items.slice(0, Math.min(LOG_N, count)).map(x => ({
-        Name: x.Name, BarCodeValue: x.BarCodeValue, ListID: x.ListID, QOH: x.QuantityOnHand
-      }));
-      dbg('snapshot sample (first ' + sample.length + '):', sample);
+    if (fs.existsSync(SNAP_PATH)) {
+      try {
+        fs.copyFileSync(SNAP_PATH, SNAP_BAK_PATH);
+      } catch (err) {
+        if (DEBUG) {
+          console.warn('[sync] snapshot backup copy failed:', err?.message || err);
+        }
+      }
     }
-    return j;
-  } catch (e) {
-    console.error('[sync] snapshot parse error:', e);
-    return { items: [] };
+
+    fs.writeFileSync(SNAP_TMP_PATH, payload, 'utf8');
+    fs.renameSync(SNAP_TMP_PATH, SNAP_PATH);
+
+    try {
+      fs.copyFileSync(SNAP_PATH, SNAP_BAK_PATH);
+    } catch (err) {
+      if (DEBUG) {
+        console.warn('[sync] snapshot backup refresh failed:', err?.message || err);
+      }
+    }
+  } catch (err) {
+    console.error('[sync] snapshot write error:', err?.message || err);
+    try {
+      if (fs.existsSync(SNAP_TMP_PATH)) fs.rmSync(SNAP_TMP_PATH, { force: true });
+    } catch (rmErr) {
+      if (DEBUG) {
+        console.warn('[sync] snapshot tmp cleanup failed:', rmErr?.message || rmErr);
+      }
+    }
+    throw err;
   }
 }
 function saveLastPush(plan) {
@@ -219,8 +275,7 @@ function pruneSnapshot(successIndices, successListIds) {
   }
 
   const updatedSnapshot = { ...snapshot, items: remainingItems };
-  ensureLogDir();
-  fs.writeFileSync(SNAP_PATH, JSON.stringify(updatedSnapshot, null, 2), 'utf8');
+  writeSnapshotFile(updatedSnapshot);
   dbg('snapshot pruned', { before: originalItems.length, after: remainingItems.length });
   return { removed: originalItems.length - remainingItems.length, remaining: remainingItems.length };
 }
