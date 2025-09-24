@@ -405,10 +405,20 @@ app.post(BASE_PATH, (req,res)=>{
             }
 
             if (auto && ok && todaysItems.length > 0) {
-              const { apply } = require('./services/shopify.sync');
-              setImmediate(() =>
-                apply().catch(e => console.error('Shopify apply error:', e))
-              );
+              const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
+              if (isSyncLocked()) {
+                console.log('Auto-push skipped: Shopify sync already running.');
+              } else {
+                setImmediate(() =>
+                  apply().catch((e) => {
+                    if (e && e.code === LOCK_ERROR_CODE) {
+                      console.log('Shopify auto-push skipped: sync already in progress.');
+                    } else {
+                      console.error('Shopify apply error:', e);
+                    }
+                  })
+                );
+              }
             } else if (auto && todaysItems.length === 0) {
               console.log('Auto-push skipped: no inventory changes detected for today.');
             }

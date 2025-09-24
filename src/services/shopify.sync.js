@@ -1,6 +1,7 @@
 // services/shopify.sync.js
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
 const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
@@ -27,6 +28,8 @@ function sleep(ms) {
 
 const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
 const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
+const LOCK_PATH = path.join(LOG_DIR, 'shopify-sync.lock');
+const LOCK_ERROR_CODE = 'SHOPIFY_SYNC_LOCKED';
 
 // --- Debug helpers ---
 const DEBUG = /^(1|true|yes)$/i.test(process.env.SHOPIFY_SYNC_DEBUG || '');
@@ -141,9 +144,91 @@ function saveLastPush(plan) {
   return payload;
 }
 
+function isSyncLocked() {
+  try {
+    return fs.existsSync(LOCK_PATH);
+  } catch (err) {
+    if (DEBUG) {
+      console.warn('[sync] lock check error:', err?.message || err);
+    }
+    return false;
+  }
+}
+
+function acquireLock() {
+  ensureLogDir();
+  const lockMeta = {
+    pid: process.pid,
+    hostname: os.hostname(),
+    acquiredAt: new Date().toISOString(),
+  };
+
+  try {
+    fs.writeFileSync(LOCK_PATH, JSON.stringify(lockMeta, null, 2), { flag: 'wx' });
+    dbg('sync lock acquired', { path: LOCK_PATH });
+  } catch (err) {
+    if (err && err.code === 'EEXIST') {
+      let info = null;
+      try { info = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); }
+      catch (readErr) {
+        if (DEBUG) {
+          console.warn('[sync] lock read error:', readErr?.message || readErr);
+        }
+      }
+      const e = new Error('Shopify sync already running.');
+      e.code = LOCK_ERROR_CODE;
+      if (info) e.lock = info;
+      throw e;
+    }
+    throw err;
+  }
+
+  return () => {
+    try {
+      fs.unlinkSync(LOCK_PATH);
+      dbg('sync lock released', { path: LOCK_PATH });
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        console.error('[sync] lock release error:', err?.message || err);
+      }
+    }
+  };
+}
+
+function pruneSnapshot(successIndices, successListIds) {
+  if ((!successIndices || successIndices.size === 0)
+    && (!successListIds || successListIds.size === 0)) {
+    return { removed: 0, remaining: null };
+  }
+
+  const snapshot = loadSnapshot();
+  const originalItems = Array.isArray(snapshot.items) ? snapshot.items : [];
+  if (!originalItems.length) {
+    return { removed: 0, remaining: 0 };
+  }
+
+  const remainingItems = originalItems.filter((item, idx) => {
+    const idxMatch = successIndices?.has(idx);
+    const listId = item?.ListID;
+    const listIdMatch = listId != null && successListIds?.has(String(listId));
+    return !(idxMatch || listIdMatch);
+  });
+
+  if (remainingItems.length === originalItems.length) {
+    return { removed: 0, remaining: remainingItems.length };
+  }
+
+  const updatedSnapshot = { ...snapshot, items: remainingItems };
+  ensureLogDir();
+  fs.writeFileSync(SNAP_PATH, JSON.stringify(updatedSnapshot, null, 2), 'utf8');
+  dbg('snapshot pruned', { before: originalItems.length, after: remainingItems.length });
+  return { removed: originalItems.length - remainingItems.length, remaining: remainingItems.length };
+}
+
 // --- Public API ---
-async function dryRun(limit) {
-  const { items } = loadSnapshot();
+async function buildPlan(limit) {
+  const snapshot = loadSnapshot();
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const fields = getSkuFieldsPriority();
   dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length });
 
@@ -154,7 +239,8 @@ async function dryRun(limit) {
   }
 
   let logged = 0;
-  for (const it of items) {
+  for (let idx = 0; idx < items.length; idx += 1) {
+    const it = items[idx];
     const sku = pickSku(it, fields);
     if (!sku) {
       if (DEBUG && logged < LOG_N) {
@@ -193,6 +279,8 @@ async function dryRun(limit) {
       target: qty,
       inventory_item_id: variant?.inventory_item_id || null,
       action: variant ? 'SET_AVAILABLE' : 'NO_MATCH',
+      snapshotIndex: idx,
+      listId: it?.ListID || null,
     });
 
     if (limit && out.length >= Number(limit)) break;
@@ -202,36 +290,80 @@ async function dryRun(limit) {
   return { fields, ops: out };
 }
 
-async function apply(limit) {
-  const plan = await dryRun(limit);
-  const results = [];
-  dbg('apply start', { plannedOps: plan.ops.length });
-
-  if (!plan.ops.length) {
-    dbg('apply: no ops to execute');
-    saveLastPush({ results });
-    return { fields: plan.fields, results };
+async function dryRun(limit) {
+  if (isSyncLocked()) {
+    const err = new Error('Shopify sync already running.');
+    err.code = LOCK_ERROR_CODE;
+    throw err;
   }
-
-  for (const op of plan.ops) {
-    if (op.action !== 'SET_AVAILABLE' || !op.inventory_item_id) {
-      if (DEBUG) dbg('apply skip', { reason: 'NO_MATCH', sku: op.sku });
-      results.push({ ...op, ok: false, error: 'NO_MATCH' });
-      continue;
-    }
-    try {
-      if (DEBUG) dbg('apply set', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target });
-      await setInventoryLevel(op.inventory_item_id, op.target);
-      results.push({ ...op, ok: true });
-    } catch (e) {
-      console.error('[sync] setInventoryLevel error', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target, err: String(e && e.message || e) });
-      results.push({ ...op, ok: false, error: String(e.message || e) });
-    }
-  }
-
-  saveLastPush({ results });
-  dbg('apply done', { ok: results.filter(r => r.ok).length, failed: results.filter(r => !r.ok).length });
-  return { fields: plan.fields, results };
+  return buildPlan(limit);
 }
 
-module.exports = { dryRun, apply, findVariantBySkuGQL, shopifyGraphQL };
+async function apply(limit) {
+  let releaseLock;
+  try {
+    releaseLock = acquireLock();
+  } catch (err) {
+    if (err && err.code === LOCK_ERROR_CODE) {
+      dbg('apply skipped: lock busy');
+    }
+    throw err;
+  }
+
+  try {
+    const plan = await buildPlan(limit);
+    const results = [];
+    dbg('apply start', { plannedOps: plan.ops.length });
+
+    if (!plan.ops.length) {
+      dbg('apply: no ops to execute');
+      const payload = saveLastPush({ results, snapshotPruned: { removed: 0, remaining: null } });
+      return { fields: plan.fields, results, lastPush: payload };
+    }
+
+    for (const op of plan.ops) {
+      if (op.action !== 'SET_AVAILABLE' || !op.inventory_item_id) {
+        if (DEBUG) dbg('apply skip', { reason: 'NO_MATCH', sku: op.sku });
+        results.push({ ...op, ok: false, error: 'NO_MATCH' });
+        continue;
+      }
+      try {
+        if (DEBUG) dbg('apply set', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target });
+        await setInventoryLevel(op.inventory_item_id, op.target);
+        results.push({ ...op, ok: true });
+      } catch (e) {
+        console.error('[sync] setInventoryLevel error', { sku: op.sku, inventory_item_id: op.inventory_item_id, target: op.target, err: String(e && e.message || e) });
+        results.push({ ...op, ok: false, error: String(e.message || e) });
+      }
+    }
+
+    const successIndices = new Set();
+    const successListIds = new Set();
+    for (const r of results) {
+      if (r && r.ok) {
+        if (Number.isInteger(r.snapshotIndex)) successIndices.add(r.snapshotIndex);
+        if (r.listId != null) successListIds.add(String(r.listId));
+      }
+    }
+
+    const pruned = pruneSnapshot(successIndices, successListIds);
+    const payload = saveLastPush({ results, snapshotPruned: pruned });
+    dbg('apply done', {
+      ok: results.filter(r => r.ok).length,
+      failed: results.filter(r => !r.ok).length,
+      pruned,
+    });
+    return { fields: plan.fields, results, lastPush: payload };
+  } finally {
+    if (typeof releaseLock === 'function') releaseLock();
+  }
+}
+
+module.exports = {
+  dryRun,
+  apply,
+  isSyncLocked,
+  findVariantBySkuGQL,
+  shopifyGraphQL,
+  LOCK_ERROR_CODE,
+};
