@@ -354,7 +354,6 @@ function mergePendingSnapshotItems(nextItems, previousSnapshot){
     } else {
       fallbackSeen.add(JSON.stringify(item));
     }
-  }
 
   let carried = 0;
   const prevItems = previousSnapshot?.items;
