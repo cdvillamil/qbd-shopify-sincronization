@@ -4,6 +4,8 @@ const path = require('path');
 const os = require('os');
 const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
 const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
+const pendingInventory = require('./pending-inventory');
+const { getSkuFieldsPriority, pickSku } = require('./sku-fields');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
   ? fetch
@@ -98,21 +100,6 @@ async function findVariantBySkuGQL(sku) {
   if (!variant_id || !inventory_item_id) return null;
 
   return { variant_id, inventory_item_id, sku: node.sku, source: 'gql' };
-}
-
-// --- SKU field priority ---
-function getSkuFieldsPriority() {
-  const env = process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name';
-  const fields = env.split(',').map(s => s.trim()).filter(Boolean);
-  dbg('SKU fields priority =', fields);
-  return fields;
-}
-function pickSku(it, fields) {
-  for (const f of fields) {
-    const v = (it[f] || '').trim();
-    if (v) return v;
-  }
-  return null;
 }
 
 // --- Snapshot helpers ---
@@ -285,6 +272,7 @@ async function buildPlan(limit) {
   const snapshot = loadSnapshot();
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const fields = getSkuFieldsPriority();
+  dbg('SKU fields priority =', fields);
   dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length });
 
   const out = [];
@@ -402,7 +390,11 @@ async function apply(limit) {
     }
 
     const pruned = pruneSnapshot(successIndices, successListIds);
-    const payload = saveLastPush({ results, snapshotPruned: pruned });
+    const pendingUpdate = pendingInventory.recordApplyResults(results, { now: new Date() });
+    if (DEBUG && (pendingUpdate.removed || pendingUpdate.updated)) {
+      dbg('pending inventory updated', pendingUpdate);
+    }
+    const payload = saveLastPush({ results, snapshotPruned: pruned, pendingInventory: pendingUpdate });
     dbg('apply done', {
       ok: results.filter(r => r.ok).length,
       failed: results.filter(r => !r.ok).length,

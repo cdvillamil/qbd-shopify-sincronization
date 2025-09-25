@@ -11,6 +11,7 @@ const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
 const { buildSalesReceiptXML } = require('./services/qbd.salesReceipt');
 const { buildCreditMemoXML } = require('./services/qbd.creditMemo');
 const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
+const pendingInventory = require('./services/pending-inventory');
 const {
   readJobs,
   enqueueJob,
@@ -215,6 +216,29 @@ function pickListId(item){
   return null;
 }
 
+function normalizeSnapshotText(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text ? text.toUpperCase() : null;
+}
+
+function buildSnapshotItemKey(item) {
+  if (!item || typeof item !== 'object') return null;
+  const listId = pickListId(item);
+  if (listId) return `LISTID:${listId}`;
+  const fullName = normalizeSnapshotText(item.FullName || item.Fullname);
+  if (fullName) return `FULLNAME:${fullName}`;
+  const name = normalizeSnapshotText(item.Name);
+  if (name) return `NAME:${name}`;
+  const manufacturer = normalizeSnapshotText(item.ManufacturerPartNumber);
+  if (manufacturer) return `MPN:${manufacturer}`;
+  const partNumber = normalizeSnapshotText(item.PartNumber);
+  if (partNumber) return `PART:${partNumber}`;
+  const barcode = normalizeSnapshotText(item.BarCodeValue);
+  if (barcode) return `BARCODE:${barcode}`;
+  return null;
+}
+
 function buildSnapshotIndex(snapshot){
   const map = new Map();
   if (!snapshot) return map;
@@ -222,15 +246,15 @@ function buildSnapshotIndex(snapshot){
   const add = (items, { pending = false, source = null } = {}) => {
     if (!Array.isArray(items)) return;
     for (const item of items) {
-      const id = pickListId(item);
-      if (!id) continue;
+      const key = buildSnapshotItemKey(item);
+      if (!key) continue;
 
-      const entry = map.get(id);
+      const entry = map.get(key);
       const candidateTs = parseQBDate(pickRelevantTimestamp(item));
       const candidate = { item, pending: Boolean(pending), source };
 
       if (!entry) {
-        map.set(id, candidate);
+        map.set(key, candidate);
         continue;
       }
 
@@ -247,9 +271,9 @@ function buildSnapshotIndex(snapshot){
       }
 
       if (useCandidate) {
-        map.set(id, { item, pending: mergedPending, source: source || entry.source || null });
+        map.set(key, { item, pending: mergedPending, source: source || entry.source || null });
       } else if (mergedPending !== entry.pending) {
-        map.set(id, { ...entry, pending: mergedPending });
+        map.set(key, { ...entry, pending: mergedPending });
       }
     }
   };
@@ -269,13 +293,13 @@ function filterUnchangedSnapshotItems(items, previousSnapshot){
   let skipped = 0;
 
   for (const item of items) {
-    const id = pickListId(item);
-    if (!id) {
+    const key = buildSnapshotItemKey(item);
+    if (!key) {
       filtered.push(item);
       continue;
     }
 
-    const prevEntry = previousMap.get(id);
+    const prevEntry = previousMap.get(key);
     if (!prevEntry) {
       filtered.push(item);
       continue;
@@ -316,6 +340,41 @@ function filterInventoryForToday(items, now = new Date()){
     return stamp && stamp >= start && stamp < end;
   });
   return { filtered, start, end };
+}
+
+function mergePendingSnapshotItems(nextItems, previousSnapshot){
+  const merged = Array.isArray(nextItems) ? [...nextItems] : [];
+  const seenKeys = new Set();
+  const fallbackSeen = new Set();
+
+  for (const item of merged) {
+    const key = buildSnapshotItemKey(item);
+    if (key) {
+      seenKeys.add(key);
+    } else {
+      fallbackSeen.add(JSON.stringify(item));
+    }
+  }
+
+  let carried = 0;
+  const prevItems = previousSnapshot?.items;
+  if (Array.isArray(prevItems) && prevItems.length > 0) {
+    for (const item of prevItems) {
+      const key = buildSnapshotItemKey(item);
+      if (key) {
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+      } else {
+        const fingerprint = JSON.stringify(item);
+        if (fallbackSeen.has(fingerprint)) continue;
+        fallbackSeen.add(fingerprint);
+      }
+      merged.push(item);
+      carried += 1;
+    }
+  }
+
+  return { merged, carried };
 }
 
 /* ===== App ===== */
@@ -525,32 +584,55 @@ app.post(BASE_PATH, (req,res)=>{
         if (current && current.type === 'inventoryQuery') {
           const previousSnapshot = readJsonSafe('last-inventory.json');
           const parsedItems = parseInventorySnapshot(resp);
+          const cycleNow = new Date();
+          const filteredAt = cycleNow.toISOString();
           const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
           const { filtered: recentItems, skipped: unchangedSkipped } =
             filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
+          const { merged: pendingItems, carried: carriedPending } =
+            mergePendingSnapshotItems(recentItems, previousSnapshot);
+          const storedPendingItems = pendingInventory.listPendingItems();
+          const storeSnapshot = storedPendingItems.length > 0 ? { items: storedPendingItems } : null;
+          const { merged: pendingWithStore, carried: carriedFromStore } =
+            mergePendingSnapshotItems(pendingItems, storeSnapshot);
+          const pendingSync = pendingInventory.syncPendingItems(pendingWithStore, { now: cycleNow });
+          const finalPendingItems = pendingSync.entries.map((entry) => entry.item);
           const snapshotPayload = {
-            count: recentItems.length,
-            filteredAt: new Date().toISOString(),
+            count: finalPendingItems.length,
+            filteredAt,
             filter: {
               mode: 'TimeModifiedSameDay',
-              timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+              timezoneOffsetMinutes: cycleNow.getTimezoneOffset(),
               start: start.toISOString(),
               endExclusive: end.toISOString(),
               sourceCount: parsedItems.length,
             },
-            items: recentItems,
+            items: finalPendingItems,
             allItems: parsedItems,
             skipped: {
               unchanged: unchangedSkipped,
               previousSnapshotItems: previousSnapshot?.items?.length || 0,
+              carriedPending,
+              carriedFromStore,
+            },
+            pendingState: {
+              tracked: pendingSync.entries.length,
+              added: pendingSync.added,
+              removed: pendingSync.removed,
+              reused: pendingSync.reused,
             },
           };
 
           saveJsonAtomic('last-inventory.json', snapshotPayload);
           console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
-            kept: recentItems.length,
+            kept: finalPendingItems.length,
             skippedUnchanged: unchangedSkipped,
+            carriedPending,
+            carriedFromStore,
+            pendingTracked: pendingSync.entries.length,
+            pendingAdded: pendingSync.added,
+            pendingRemoved: pendingSync.removed,
             start: start.toISOString(),
             end: end.toISOString(),
           });
@@ -565,7 +647,7 @@ app.post(BASE_PATH, (req,res)=>{
               console.warn('Auto-push skipped due to QuickBooks error status.');
             }
 
-            if (auto && ok && recentItems.length > 0) {
+            if (auto && ok && finalPendingItems.length > 0) {
               const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
               if (isSyncLocked()) {
                 console.log('Auto-push skipped: Shopify sync already running.');
@@ -580,7 +662,7 @@ app.post(BASE_PATH, (req,res)=>{
                   })
                 );
               }
-            } else if (auto && recentItems.length === 0) {
+            } else if (auto && finalPendingItems.length === 0) {
               console.log('Auto-push skipped: no inventory changes detected for today.');
             }
           } catch (e) {
