@@ -318,6 +318,30 @@ function filterInventoryForToday(items, now = new Date()){
   return { filtered, start, end };
 }
 
+function mergePendingSnapshotItems(nextItems, previousSnapshot){
+  const merged = Array.isArray(nextItems) ? [...nextItems] : [];
+  const seenIds = new Set();
+
+  for (const item of merged) {
+    const id = pickListId(item);
+    if (id) seenIds.add(id);
+  }
+
+  let carried = 0;
+  const prevItems = previousSnapshot?.items;
+  if (Array.isArray(prevItems) && prevItems.length > 0) {
+    for (const item of prevItems) {
+      const id = pickListId(item);
+      if (!id || seenIds.has(id)) continue;
+      merged.push(item);
+      seenIds.add(id);
+      carried += 1;
+    }
+  }
+
+  return { merged, carried };
+}
+
 /* ===== App ===== */
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
@@ -528,8 +552,10 @@ app.post(BASE_PATH, (req,res)=>{
           const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
           const { filtered: recentItems, skipped: unchangedSkipped } =
             filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
+          const { merged: pendingItems, carried: carriedPending } =
+            mergePendingSnapshotItems(recentItems, previousSnapshot);
           const snapshotPayload = {
-            count: recentItems.length,
+            count: pendingItems.length,
             filteredAt: new Date().toISOString(),
             filter: {
               mode: 'TimeModifiedSameDay',
@@ -538,19 +564,21 @@ app.post(BASE_PATH, (req,res)=>{
               endExclusive: end.toISOString(),
               sourceCount: parsedItems.length,
             },
-            items: recentItems,
+            items: pendingItems,
             allItems: parsedItems,
             skipped: {
               unchanged: unchangedSkipped,
               previousSnapshotItems: previousSnapshot?.items?.length || 0,
+              carriedPending,
             },
           };
 
           saveJsonAtomic('last-inventory.json', snapshotPayload);
           console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
-            kept: recentItems.length,
+            kept: pendingItems.length,
             skippedUnchanged: unchangedSkipped,
+            carriedPending,
             start: start.toISOString(),
             end: end.toISOString(),
           });
@@ -565,7 +593,7 @@ app.post(BASE_PATH, (req,res)=>{
               console.warn('Auto-push skipped due to QuickBooks error status.');
             }
 
-            if (auto && ok && recentItems.length > 0) {
+            if (auto && ok && pendingItems.length > 0) {
               const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
               if (isSyncLocked()) {
                 console.log('Auto-push skipped: Shopify sync already running.');
@@ -580,7 +608,7 @@ app.post(BASE_PATH, (req,res)=>{
                   })
                 );
               }
-            } else if (auto && recentItems.length === 0) {
+            } else if (auto && pendingItems.length === 0) {
               console.log('Auto-push skipped: no inventory changes detected for today.');
             }
           } catch (e) {
