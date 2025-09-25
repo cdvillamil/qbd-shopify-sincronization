@@ -528,8 +528,27 @@ app.post(BASE_PATH, (req,res)=>{
           const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
           const { filtered: recentItems, skipped: unchangedSkipped } =
             filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
+
+          const recentById = new Set();
+          for (const item of recentItems) {
+            const id = pickListId(item);
+            if (id) recentById.add(id);
+          }
+
+          const carryOverPending = [];
+          if (Array.isArray(previousSnapshot?.items)) {
+            for (const pending of previousSnapshot.items) {
+              const id = pickListId(pending);
+              if (!id || recentById.has(id)) continue;
+              carryOverPending.push(pending);
+              recentById.add(id);
+            }
+          }
+
+          const mergedItems =
+            carryOverPending.length > 0 ? [...recentItems, ...carryOverPending] : recentItems;
           const snapshotPayload = {
-            count: recentItems.length,
+            count: mergedItems.length,
             filteredAt: new Date().toISOString(),
             filter: {
               mode: 'TimeModifiedSameDay',
@@ -538,19 +557,21 @@ app.post(BASE_PATH, (req,res)=>{
               endExclusive: end.toISOString(),
               sourceCount: parsedItems.length,
             },
-            items: recentItems,
+            items: mergedItems,
             allItems: parsedItems,
             skipped: {
               unchanged: unchangedSkipped,
               previousSnapshotItems: previousSnapshot?.items?.length || 0,
+              pendingCarryOver: carryOverPending.length,
             },
           };
 
           saveJsonAtomic('last-inventory.json', snapshotPayload);
           console.log('[inventory] snapshot filtered for today', {
             totalReceived: parsedItems.length,
-            kept: recentItems.length,
+            kept: mergedItems.length,
             skippedUnchanged: unchangedSkipped,
+            carriedPending: carryOverPending.length,
             start: start.toISOString(),
             end: end.toISOString(),
           });
