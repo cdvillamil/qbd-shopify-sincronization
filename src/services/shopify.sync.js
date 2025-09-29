@@ -200,6 +200,34 @@ function saveLastPush(plan) {
   return payload;
 }
 
+function hasLastPushRecord() {
+  try {
+    return fs.existsSync(LAST_PUSH_PATH);
+  } catch (err) {
+    if (DEBUG) {
+      console.warn('[sync] last push check error:', err?.message || err);
+    }
+    return false;
+  }
+}
+
+function selectSnapshotItemsForSync(snapshot) {
+  const filteredItems = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  if (filteredItems.length > 0) {
+    return { items: filteredItems, source: 'filtered' };
+  }
+
+  const allItems = Array.isArray(snapshot?.allItems) ? snapshot.allItems : [];
+  if (allItems.length > 0 && !hasLastPushRecord()) {
+    console.log('[sync] initial sync detected → using full snapshot as source', {
+      count: allItems.length,
+    });
+    return { items: allItems, source: 'initial-full' };
+  }
+
+  return { items: filteredItems, source: 'empty' };
+}
+
 function isSyncLocked() {
   try {
     return fs.existsSync(LOCK_PATH);
@@ -283,9 +311,9 @@ function pruneSnapshot(successIndices, successListIds) {
 // --- Public API ---
 async function buildPlan(limit) {
   const snapshot = loadSnapshot();
-  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const { items, source } = selectSnapshotItemsForSync(snapshot);
   const fields = getSkuFieldsPriority();
-  dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length });
+  dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length, snapshotSource: source });
 
   const out = [];
   if (!items || items.length === 0) {
