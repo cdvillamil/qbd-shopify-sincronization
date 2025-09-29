@@ -547,6 +547,9 @@ app.post(BASE_PATH, (req,res)=>{
 
           const mergedItems =
             carryOverPending.length > 0 ? [...recentItems, ...carryOverPending] : recentItems;
+          const hasPendingCarryOver = carryOverPending.length > 0;
+          const hasRecentChanges = recentItems.length > 0;
+          const hasWorkForSync = hasRecentChanges || hasPendingCarryOver;
           const snapshotPayload = {
             count: mergedItems.length,
             filteredAt: new Date().toISOString(),
@@ -586,7 +589,7 @@ app.post(BASE_PATH, (req,res)=>{
               console.warn('Auto-push skipped due to QuickBooks error status.');
             }
 
-            if (auto && ok && recentItems.length > 0) {
+            if (auto && ok && hasWorkForSync) {
               const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
               if (isSyncLocked()) {
                 console.log('Auto-push skipped: Shopify sync already running.');
@@ -601,8 +604,8 @@ app.post(BASE_PATH, (req,res)=>{
                   })
                 );
               }
-            } else if (auto && recentItems.length === 0) {
-              console.log('Auto-push skipped: no inventory changes detected for today.');
+            } else if (auto && !hasWorkForSync) {
+              console.log('Auto-push skipped: no inventory changes or pending carry-over items detected for today.');
             }
           } catch (e) {
             console.error('Auto-push init error:', e);
