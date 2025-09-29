@@ -318,6 +318,41 @@ function filterInventoryForToday(items, now = new Date()){
   return { filtered, start, end };
 }
 
+async function ensureInitialInventorySeedIfNeeded(context = 'sendRequestXML') {
+  try {
+    ensureLogDir();
+    const snapshotPath = fp('last-inventory.json');
+    if (fs.existsSync(snapshotPath)) {
+      return false;
+    }
+
+    const currentJob = getCurrentJob();
+    if (currentJob && currentJob.type === 'inventoryQuery') {
+      return false;
+    }
+
+    const queuedJobs = readJobs();
+    const hasPendingInventoryJob = queuedJobs.some((job) => job && job.type === 'inventoryQuery');
+    if (hasPendingInventoryJob) {
+      return false;
+    }
+
+    const job = {
+      type: 'inventoryQuery',
+      ts: new Date().toISOString(),
+      reason: 'auto-initial-sweep',
+      context,
+    };
+
+    await enqueue(job);
+    console.log('[inventory] Initial inventory sweep enqueued automatically.', job);
+    return true;
+  } catch (err) {
+    console.error('[inventory] Failed to enqueue initial inventory sweep:', err?.message || err);
+    return false;
+  }
+}
+
 /* ===== App ===== */
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
@@ -465,6 +500,7 @@ app.post(BASE_PATH, (req,res)=>{
       }
       else if (is('sendRequestXML')) {
         // ¿Hay trabajo en cola?
+        await ensureInitialInventorySeedIfNeeded('sendRequestXML');
         let job = peekJob();
         let qbxml = '';
         while (job) {
