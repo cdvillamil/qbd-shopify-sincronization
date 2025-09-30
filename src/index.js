@@ -30,6 +30,11 @@ const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LAST_ERROR_FILE = 'last-error.txt';
 const TNS       = 'http://developer.intuit.com/';
 
+const SKU_FIELD_PRIORITY = (process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
@@ -212,6 +217,17 @@ function pickListId(item){
   if (!item) return null;
   if (item.ListID != null) return String(item.ListID);
   if (item.ListId != null) return String(item.ListId);
+  return null;
+}
+
+function pickSkuForSnapshot(item) {
+  if (!item) return null;
+  for (const field of SKU_FIELD_PRIORITY) {
+    const raw = item[field];
+    if (raw == null) continue;
+    const value = String(raw).trim();
+    if (value) return value.toUpperCase();
+  }
   return null;
 }
 
@@ -529,25 +545,52 @@ app.post(BASE_PATH, (req,res)=>{
           const { filtered: recentItems, skipped: unchangedSkipped } =
             filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
 
-          const recentById = new Set();
+          const seenSnapshotKeys = new Set();
+          const mergedItems = [];
+
+          const registerSnapshotItem = (item, source) => {
+            if (!item) return false;
+
+            const keys = [];
+            const listId = pickListId(item);
+            if (listId) keys.push(`id:${listId}`);
+
+            const sku = pickSkuForSnapshot(item);
+            if (sku) keys.push(`sku:${sku}`);
+
+            if (keys.length === 0) {
+              keys.push(`anon:${mergedItems.length}:${source || 'unknown'}`);
+            }
+
+            let alreadySeen = false;
+            for (const key of keys) {
+              if (seenSnapshotKeys.has(key)) {
+                alreadySeen = true;
+                break;
+              }
+            }
+
+            for (const key of keys) seenSnapshotKeys.add(key);
+            if (alreadySeen) return false;
+
+            mergedItems.push(item);
+            return true;
+          };
+
           for (const item of recentItems) {
-            const id = pickListId(item);
-            if (id) recentById.add(id);
+            registerSnapshotItem(item, 'recent');
           }
 
-          const carryOverPending = [];
+          let carriedOver = 0;
           if (Array.isArray(previousSnapshot?.items)) {
             for (const pending of previousSnapshot.items) {
-              const id = pickListId(pending);
-              if (!id || recentById.has(id)) continue;
-              carryOverPending.push(pending);
-              recentById.add(id);
+              if (registerSnapshotItem(pending, 'carry')) {
+                carriedOver += 1;
+              }
             }
           }
 
-          const mergedItems =
-            carryOverPending.length > 0 ? [...recentItems, ...carryOverPending] : recentItems;
-          const hasPendingCarryOver = carryOverPending.length > 0;
+          const hasPendingCarryOver = carriedOver > 0;
           const hasRecentChanges = recentItems.length > 0;
           const hasWorkForSync = hasRecentChanges || hasPendingCarryOver;
           const snapshotPayload = {
@@ -565,19 +608,19 @@ app.post(BASE_PATH, (req,res)=>{
             skipped: {
               unchanged: unchangedSkipped,
               previousSnapshotItems: previousSnapshot?.items?.length || 0,
-              pendingCarryOver: carryOverPending.length,
+              pendingCarryOver: carriedOver,
             },
           };
 
-          saveJsonAtomic('last-inventory.json', snapshotPayload);
-          console.log('[inventory] snapshot filtered for today', {
-            totalReceived: parsedItems.length,
-            kept: mergedItems.length,
-            skippedUnchanged: unchangedSkipped,
-            carriedPending: carryOverPending.length,
-            start: start.toISOString(),
-            end: end.toISOString(),
-          });
+            saveJsonAtomic('last-inventory.json', snapshotPayload);
+            console.log('[inventory] snapshot filtered for today', {
+              totalReceived: parsedItems.length,
+              kept: mergedItems.length,
+              skippedUnchanged: unchangedSkipped,
+              carriedPending: carriedOver,
+              start: start.toISOString(),
+              end: end.toISOString(),
+            });
 
           // --- Auto push a Shopify (después de persistir el snapshot) ---
           try {
