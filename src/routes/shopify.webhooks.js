@@ -108,7 +108,7 @@ function buildRefNumber(primary, fallbackPrefix, fallbackValue) {
   if (primaryRef) return primaryRef;
   const fallbackRef = sanitizeRefNumber(fallbackValue);
   if (fallbackRef) return fallbackRef;
-  const fallback = `${fallbackPrefix || 'SR'}${Date.now()}`;
+  const fallback = `${fallbackPrefix || 'INV'}${Date.now()}`;
   return sanitizeRefNumber(fallback) || fallback.slice(-11);
 }
 
@@ -282,7 +282,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const jobPayload = {
       customer: buildCustomerRef(customerSource),
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
-      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
+      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'INV', payload?.id),
       memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
       billAddress: mapAddress(payload?.billing_address),
       shipAddress: mapAddress(payload?.shipping_address),
@@ -296,7 +296,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     if (depositAccountRef) jobPayload.depositToAccount = depositAccountRef;
 
     await enqueueJob({
-      type: 'salesReceiptAdd',
+      type: 'invoiceAdd',
       source: 'shopify-order',
       createdAt: new Date().toISOString(),
       payload: jobPayload,
