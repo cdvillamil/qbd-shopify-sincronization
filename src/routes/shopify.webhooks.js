@@ -112,30 +112,8 @@ function buildRefNumber(primary, fallbackPrefix, fallbackValue) {
   return sanitizeRefNumber(fallback) || fallback.slice(-11);
 }
 
-function buildCustomerRef(order) {
-  const envCustomer = envRef('QBD_SHOPIFY_CUSTOMER');
-  if (envCustomer) return envCustomer;
-
-  const parts = [];
-  if (order?.customer) {
-    if (order.customer.first_name) parts.push(order.customer.first_name);
-    if (order.customer.last_name) parts.push(order.customer.last_name);
-  }
-  if (!parts.length && order?.billing_address) {
-    if (order.billing_address.first_name) parts.push(order.billing_address.first_name);
-    if (order.billing_address.last_name) parts.push(order.billing_address.last_name);
-  }
-  if (!parts.length && order?.shipping_address) {
-    if (order.shipping_address.first_name) parts.push(order.shipping_address.first_name);
-    if (order.shipping_address.last_name) parts.push(order.shipping_address.last_name);
-  }
-  if (!parts.length && order?.email) parts.push(order.email);
-
-  let name = parts.join(' ').replace(/\s+/g, ' ').trim();
-  if (!name) name = `Shopify Customer ${order?.id || ''}`.trim();
-  if (!name) name = 'Shopify Customer';
-  if (name.length > 41) name = name.slice(0, 41);
-  return { FullName: name };
+function onlineSalesCustomerRef() {
+  return envRef('QBD_SHOPIFY_CUSTOMER', 'ONLINE SALES') || { FullName: 'ONLINE SALES' };
 }
 
 function buildShippingLines(order) {
@@ -278,9 +256,15 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       return res.status(200).json({ ok: true, queued: false, notFound });
     }
 
-    const customerSource = payload?.order ? payload.order : { ...payload, id: payload?.order_id || payload?.id };
+    const classRef = envRef('QBD_SHOPIFY_CLASS');
+    const arAccountRef = envRef('QBD_SHOPIFY_AR_ACCOUNT');
+    const termsRef = envRef('QBD_SHOPIFY_TERMS');
+    const templateRef = envRef('QBD_SHOPIFY_TEMPLATE');
+    const salesRepRef = envRef('QBD_SHOPIFY_SALESREP');
+    const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
+
     const jobPayload = {
-      customer: buildCustomerRef(customerSource),
+      customer: onlineSalesCustomerRef(),
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
       refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
       memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
@@ -289,14 +273,15 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       lines: allLines,
     };
 
-    const paymentMethodRef = envRef('QBD_SHOPIFY_PAYMENT_METHOD');
-    if (paymentMethodRef) jobPayload.paymentMethod = paymentMethodRef;
-
-    const depositAccountRef = envRef('QBD_SHOPIFY_DEPOSIT_ACCOUNT');
-    if (depositAccountRef) jobPayload.depositToAccount = depositAccountRef;
+    if (classRef) jobPayload.ClassRef = classRef;
+    if (arAccountRef) jobPayload.ARAccountRef = arAccountRef;
+    if (termsRef) jobPayload.TermsRef = termsRef;
+    if (templateRef) jobPayload.TemplateRef = templateRef;
+    if (salesRepRef) jobPayload.SalesRepRef = salesRepRef;
+    if (shipMethodRef) jobPayload.ShipMethodRef = shipMethodRef;
 
     await enqueueJob({
-      type: 'salesReceiptAdd',
+      type: 'invoiceAdd',
       source: 'shopify-order',
       createdAt: new Date().toISOString(),
       payload: jobPayload,
@@ -382,9 +367,6 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
 
     if (delta < 0) {
       const quantity = Math.abs(delta);
-      const customerRef = envRef('QBD_SHOPIFY_CUSTOMER', 'Shopify Online Customer') || {
-        FullName: 'Shopify Online Customer',
-      };
       const classRef = envRef('QBD_SHOPIFY_CLASS');
       const arAccountRef = envRef('QBD_SHOPIFY_AR_ACCOUNT');
       const termsRef = envRef('QBD_SHOPIFY_TERMS');
@@ -399,9 +381,14 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         sku;
 
       const invoicePayload = {
-        customer: customerRef,
+        customer: onlineSalesCustomerRef(),
         txnDate: toQBDate(payload?.updated_at || inventoryLevel?.updated_at || new Date()),
         memo: `Shopify auto invoice for ${sku}`,
+        refNumber: buildRefNumber(
+          payload?.order_number ?? payload?.name ?? payload?.inventory_level?.origin_document_number,
+          'INV',
+          payload?.inventory_item_id
+        ),
         lines: [
           {
             ItemRef: itemRef,
