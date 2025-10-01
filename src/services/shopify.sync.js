@@ -395,10 +395,12 @@ async function apply(limit) {
     const successIndices = new Set();
     const successListIds = new Set();
     for (const r of results) {
-      if (r && r.ok) {
-        if (Number.isInteger(r.snapshotIndex)) successIndices.add(r.snapshotIndex);
-        if (r.listId != null) successListIds.add(String(r.listId));
-      }
+      if (!r || !r.ok) continue;
+      if (r.action !== 'SET_AVAILABLE') continue;
+      if (!r.inventory_item_id) continue;
+
+      if (Number.isInteger(r.snapshotIndex)) successIndices.add(r.snapshotIndex);
+      if (r.listId != null) successListIds.add(String(r.listId));
     }
 
     const pruned = pruneSnapshot(successIndices, successListIds);
