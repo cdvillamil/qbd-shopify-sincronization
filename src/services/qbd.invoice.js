@@ -35,8 +35,19 @@ function lineXml(line = {}) {
   if (quantity != null) parts.push(`<Quantity>${escapeXml(quantity)}</Quantity>`);
 
   const rate = line.Rate != null ? line.Rate : line.rate;
+  const shopifyPrice =
+    line.ShopifyPurchasePrice != null
+      ? line.ShopifyPurchasePrice
+      : line.shopifyPurchasePrice != null
+      ? line.shopifyPurchasePrice
+      : line.ShopifyPrice != null
+      ? line.ShopifyPrice
+      : line.shopifyPrice != null
+      ? line.shopifyPrice
+      : null;
   const amount = line.Amount != null ? line.Amount : line.amount;
-  const rateStr = rate != null ? formatMoney(rate) : null;
+  const resolvedRate = rate != null ? rate : shopifyPrice;
+  const rateStr = resolvedRate != null ? formatMoney(resolvedRate) : null;
   const amountStr = amount != null ? formatMoney(amount) : null;
   if (rateStr != null) parts.push(`<Rate>${rateStr}</Rate>`);
   if (amountStr != null && rateStr == null) parts.push(`<Amount>${amountStr}</Amount>`);

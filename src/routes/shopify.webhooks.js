@@ -129,6 +129,7 @@ function buildShippingLines(order) {
       Desc: ship?.title || 'Shipping',
       Quantity: 1,
       Rate: amount,
+      ShopifyPurchasePrice: amount,
     });
   }
   return out;
@@ -144,6 +145,7 @@ function buildDiscountLine(order) {
     Desc: 'Shopify discount',
     Quantity: 1,
     Rate: -discount,
+    ShopifyPurchasePrice: -discount,
   };
 }
 
@@ -179,7 +181,10 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
       Desc: desc,
       Quantity: qty,
     };
-    if (rate != null) line.Rate = rate;
+    if (rate != null) {
+      line.Rate = rate;
+      line.ShopifyPurchasePrice = rate;
+    }
     matched.push(line);
   }
 
@@ -225,7 +230,10 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
       Desc: desc,
       Quantity: qty,
     };
-    if (rate != null) line.Rate = rate;
+    if (rate != null) {
+      line.Rate = rate;
+      line.ShopifyPurchasePrice = rate;
+    }
     matched.push(line);
   }
 
