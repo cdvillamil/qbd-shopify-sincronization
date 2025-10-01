@@ -44,6 +44,16 @@ function lineXml(line = {}) {
       ? line.ShopifyPrice
       : line.shopifyPrice != null
       ? line.shopifyPrice
+      : line.PurchasePrice != null
+      ? line.PurchasePrice
+      : line.purchasePrice != null
+      ? line.purchasePrice
+      : line.purchase_price != null
+      ? line.purchase_price
+      : line.Price != null
+      ? line.Price
+      : line.price != null
+      ? line.price
       : null;
   const amount = line.Amount != null ? line.Amount : line.amount;
   const resolvedRate = rate != null ? rate : shopifyPrice;
@@ -51,6 +61,9 @@ function lineXml(line = {}) {
   const amountStr = amount != null ? formatMoney(amount) : null;
   if (rateStr != null) parts.push(`<Rate>${rateStr}</Rate>`);
   if (amountStr != null && rateStr == null) parts.push(`<Amount>${amountStr}</Amount>`);
+
+  const purchasePriceStr = shopifyPrice != null ? formatMoney(shopifyPrice) : null;
+  if (purchasePriceStr != null) parts.push(`<Other1>${purchasePriceStr}</Other1>`);
 
   if (line.ServiceDate || line.serviceDate) {
     const xml = optionalDate('ServiceDate', line.ServiceDate || line.serviceDate);
