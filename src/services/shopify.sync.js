@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { findVariantBySKU, setInventoryLevel } = require('./shopify.client');
+const { findVariantBySKU, getInventoryItemSku, setInventoryLevel } = require('./shopify.client');
 const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
@@ -98,6 +98,43 @@ async function findVariantBySkuGQL(sku) {
   if (!variant_id || !inventory_item_id) return null;
 
   return { variant_id, inventory_item_id, sku: node.sku, source: 'gql' };
+}
+
+async function confirmRestVariant(variant, sku) {
+  if (!variant || !variant.inventory_item_id) return null;
+
+  try {
+    const remoteSku = await getInventoryItemSku(variant.inventory_item_id);
+    const normalizedRemote = String(remoteSku || '').trim();
+    const normalizedSku = String(sku || '').trim();
+
+    if (!normalizedRemote) {
+      if (DEBUG) dbg('REST variant rejected: empty remote SKU', { sku, inventory_item_id: variant.inventory_item_id });
+      return null;
+    }
+
+    if (normalizedRemote !== normalizedSku) {
+      if (DEBUG) {
+        dbg('REST variant rejected: SKU mismatch', {
+          requested: normalizedSku,
+          remote: normalizedRemote,
+          inventory_item_id: variant.inventory_item_id,
+        });
+      }
+      return null;
+    }
+
+    return { ...variant, source: 'rest' };
+  } catch (err) {
+    if (DEBUG) {
+      dbg('REST variant confirmation failed', {
+        sku,
+        inventory_item_id: variant.inventory_item_id,
+        error: err?.message || err,
+      });
+    }
+    return null;
+  }
 }
 
 // --- SKU field priority ---
@@ -311,8 +348,9 @@ async function buildPlan(limit) {
       // 1) Búsqueda exacta por SKU con GraphQL (fiable)
       variant = await findVariantBySkuGQL(sku);
       if (!variant) {
-        // 2) Fallback a tu buscador REST existente (por compatibilidad)
-        variant = await findVariantBySKU(sku);
+        // 2) Fallback a tu buscador REST existente (por compatibilidad).
+        const restVariant = await findVariantBySKU(sku);
+        variant = await confirmRestVariant(restVariant, sku);
       }
 
       if (DEBUG && logged < LOG_N) {
