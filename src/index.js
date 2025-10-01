@@ -8,7 +8,7 @@ const crypto  = require('crypto');
 const { buildInventoryQueryXML } = require('./services/inventory');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
 const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
-const { buildSalesReceiptXML } = require('./services/qbd.salesReceipt');
+const { buildInvoiceXML } = require('./services/qbd.invoice');
 const { buildCreditMemoXML } = require('./services/qbd.creditMemo');
 const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
 const {
@@ -159,9 +159,9 @@ function qbxmlFor(job) {
     return buildInventoryAdjustmentXML(job.lines || [], job.account, ver);
   }
 
-  if (job.type === 'salesReceiptAdd') {
+  if (job.type === 'invoiceAdd') {
     const ver = job.qbxmlVer || process.env.QBXML_VER || '16.0';
-    return buildSalesReceiptXML(job.payload || job, ver);
+    return buildInvoiceXML(job.payload || job, ver);
   }
 
   if (job.type === 'creditMemoAdd') {
