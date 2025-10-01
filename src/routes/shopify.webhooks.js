@@ -377,13 +377,62 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       });
     }
     console.log('[WEBHOOK] payload parsed', { invItemId, sku, qbdQoh, newAvailable, resolvedAdjustment, delta });
-    await enqueueJob({
-      type: 'inventoryAdjust',
-      lines: [{ ...itemRef, QuantityDifference: delta }],
-      account: process.env.QBD_ADJUST_ACCOUNT || undefined,
-      source: 'shopify-inventory-level',
-      createdAt: new Date().toISOString(),
-    });
+
+    const queuedType = delta < 0 ? 'invoiceAdd' : 'inventoryAdjust';
+
+    if (delta < 0) {
+      const quantity = Math.abs(delta);
+      const customerRef = envRef('QBD_SHOPIFY_CUSTOMER', 'Shopify Online Customer') || {
+        FullName: 'Shopify Online Customer',
+      };
+      const classRef = envRef('QBD_SHOPIFY_CLASS');
+      const arAccountRef = envRef('QBD_SHOPIFY_AR_ACCOUNT');
+      const termsRef = envRef('QBD_SHOPIFY_TERMS');
+      const templateRef = envRef('QBD_SHOPIFY_TEMPLATE');
+      const salesRepRef = envRef('QBD_SHOPIFY_SALESREP');
+      const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
+
+      const lineDesc =
+        (typeof it?.SalesDesc === 'string' && it.SalesDesc.trim()) ||
+        (typeof it?.FullName === 'string' && it.FullName.trim()) ||
+        (typeof it?.Name === 'string' && it.Name.trim()) ||
+        sku;
+
+      const invoicePayload = {
+        customer: customerRef,
+        txnDate: toQBDate(payload?.updated_at || inventoryLevel?.updated_at || new Date()),
+        memo: `Shopify auto invoice for ${sku}`,
+        lines: [
+          {
+            ItemRef: itemRef,
+            Desc: lineDesc,
+            Quantity: quantity,
+          },
+        ],
+      };
+
+      if (classRef) invoicePayload.ClassRef = classRef;
+      if (arAccountRef) invoicePayload.ARAccountRef = arAccountRef;
+      if (termsRef) invoicePayload.TermsRef = termsRef;
+      if (templateRef) invoicePayload.TemplateRef = templateRef;
+      if (salesRepRef) invoicePayload.SalesRepRef = salesRepRef;
+      if (shipMethodRef) invoicePayload.ShipMethodRef = shipMethodRef;
+
+      await enqueueJob({
+        type: 'invoiceAdd',
+        source: 'shopify-inventory-level',
+        createdAt: new Date().toISOString(),
+        payload: invoicePayload,
+      });
+    } else {
+      await enqueueJob({
+        type: 'inventoryAdjust',
+        lines: [{ ...itemRef, QuantityDifference: delta }],
+        account: process.env.QBD_ADJUST_ACCOUNT || undefined,
+        source: 'shopify-inventory-level',
+        createdAt: new Date().toISOString(),
+      });
+    }
 
     return res.status(200).json({
       ok: true,
@@ -393,6 +442,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
       availableAdjustment: resolvedAdjustment,
       delta,
       queued: true,
+      queuedType,
     });
   } catch (e) {
     console.error('inventory_levels/update webhook error:', e);
