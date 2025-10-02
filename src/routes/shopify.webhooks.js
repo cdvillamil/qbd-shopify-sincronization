@@ -139,16 +139,18 @@ function buildCustomerRef(order) {
 }
 
 function buildShippingLines(order) {
-  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM');
+  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM', 'SHIPPING WITH GUARANTEE');
   if (!ref) return [];
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
   const out = [];
   for (const ship of lines) {
     const amount = parseMoney(ship?.price ?? ship?.price_set?.shop_money?.amount);
     if (!amount || amount <= 0) continue;
+    const description =
+      ship?.title || process.env.QBD_SHOPIFY_SHIPPING_DESC || 'CHARGE TO BE APPLIED TO ANY SHIP ITEM';
     out.push({
       ItemRef: { ...ref },
-      Desc: ship?.title || 'Shipping',
+      Desc: description,
       Quantity: 1,
       Rate: amount,
     });
@@ -169,10 +171,11 @@ function buildDiscountLine(order) {
   };
 }
 
-function collectOrderLines(order, inventoryItems, fieldsPriority) {
+function collectOrderLines(order, inventoryItems, fieldsPriority, options = {}) {
   const linesIn = Array.isArray(order?.line_items) ? order.line_items : [];
   const matched = [];
   const notFound = [];
+  const fallbackItemRef = options?.fallbackItemRef ? { ...options.fallbackItemRef } : null;
 
   for (const li of linesIn) {
     const sku = String(li?.sku || '').trim();
@@ -180,13 +183,11 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
     if (!sku || !qty) continue;
 
     const item = resolveSkuToItem(inventoryItems || [], sku, fieldsPriority);
-    if (!item || (!item.ListID && !item.FullName && !item.Name)) {
+    let ref = item ? toItemRef(item) : null;
+    if (!ref && fallbackItemRef) {
+      ref = { ...fallbackItemRef };
       notFound.push(sku);
-      continue;
-    }
-
-    const ref = toItemRef(item);
-    if (!ref) {
+    } else if (!ref) {
       notFound.push(sku);
       continue;
     }
@@ -266,8 +267,11 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const payload = JSON.parse(req.body.toString('utf8'));
     const inventory = loadInventory();
     const fieldsPriority = skuFields();
+    const fallbackProductItemRef = envRef('QBD_SHOPIFY_PRODUCT_ITEM', 'PRUEBA-INVOICE');
 
-    const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority);
+    const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority, {
+      fallbackItemRef: fallbackProductItemRef || undefined,
+    });
     const shippingLines = buildShippingLines(payload);
     const discountLine = buildDiscountLine(payload);
 
