@@ -11,6 +11,8 @@ const { enqueueJob, LOG_DIR } = require('../services/jobQueue');
 
 const router = express.Router();
 
+const SHIPPING_DESC_FALLBACK = 'CHARGE TO BE APPLIED ON SHIP ITEM';
+
 // === snapshot de QBD para conocer QOH (QuantityOnHand)
 const INV_PATH = path.join(LOG_DIR, 'last-inventory.json');
 function loadInventory() {
@@ -122,11 +124,17 @@ function buildShippingLines(order) {
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
   const out = [];
   for (const ship of lines) {
-    const amount = parseMoney(ship?.price ?? ship?.price_set?.shop_money?.amount);
-    if (!amount || amount <= 0) continue;
+    const amount = parseMoney(
+      ship?.price ?? ship?.price_set?.shop_money?.amount ?? ship?.discounted_price
+    );
+    if (amount == null) continue;
+    const descEnv = process.env.QBD_SHOPIFY_SHIPPING_DESC;
+    const resolvedDesc = descEnv && descEnv.trim() ? descEnv.trim() : null;
+    const sourceDesc = typeof ship?.title === 'string' ? ship.title.trim() : '';
+    const desc = resolvedDesc || sourceDesc || SHIPPING_DESC_FALLBACK;
     out.push({
       ItemRef: { ...ref },
-      Desc: ship?.title || 'Shipping',
+      Desc: desc,
       Quantity: 1,
       Rate: amount,
       ShopifyPurchasePrice: amount,
@@ -147,6 +155,66 @@ function buildDiscountLine(order) {
     Rate: -discount,
     ShopifyPurchasePrice: -discount,
   };
+}
+
+function sumTaxLines(lines) {
+  if (!Array.isArray(lines)) return null;
+  let total = 0;
+  let has = false;
+  for (const line of lines) {
+    const val = parseMoney(
+      line?.price ?? line?.price_set?.shop_money?.amount ?? line?.amount ?? line?.amount_set?.shop_money?.amount
+    );
+    if (val == null) continue;
+    total += val;
+    has = true;
+  }
+  if (!has) return null;
+  return Math.round(total * 100) / 100;
+}
+
+function buildOrderTaxDetails(order) {
+  const taxRef = envRef('QBD_SHOPIFY_TAX_ITEM');
+  if (!taxRef) return null;
+
+  const taxAmount =
+    parseMoney(order?.current_total_tax) ??
+    parseMoney(order?.total_tax) ??
+    parseMoney(order?.total_tax_set?.shop_money?.amount) ??
+    sumTaxLines(order?.tax_lines);
+
+  if (taxAmount == null || taxAmount <= 0) return null;
+
+  const totalPrice =
+    parseMoney(order?.current_total_price) ??
+    parseMoney(order?.total_price) ??
+    parseMoney(order?.total_price_set?.shop_money?.amount);
+
+  let salesTaxPercentage = null;
+  if (totalPrice != null && totalPrice > taxAmount) {
+    const taxableBase = totalPrice - taxAmount;
+    if (taxableBase > 0.0001) {
+      const raw = (taxAmount / taxableBase) * 100;
+      const rounded = Math.round(raw * 1000) / 1000;
+      salesTaxPercentage = rounded.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    }
+  }
+
+  return {
+    itemSalesTaxRef: taxRef,
+    salesTaxTotal: taxAmount,
+    salesTaxPercentage,
+    applyTaxAfterDiscount: true,
+    totalPrice,
+  };
+}
+
+function buildOrderMemo(order) {
+  const name = typeof order?.name === 'string' ? order.name.trim() : '';
+  if (name) return name;
+  if (order?.order_number != null) return `#${order.order_number}`;
+  if (order?.id != null) return String(order.id);
+  return null;
 }
 
 function collectOrderLines(order, inventoryItems, fieldsPriority) {
@@ -256,6 +324,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority);
     const shippingLines = buildShippingLines(payload);
     const discountLine = buildDiscountLine(payload);
+    const taxDetails = buildOrderTaxDetails(payload);
 
     const allLines = [...matched, ...shippingLines];
     if (discountLine) allLines.push(discountLine);
@@ -271,15 +340,24 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const salesRepRef = envRef('QBD_SHOPIFY_SALESREP');
     const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
 
+    const memo = buildOrderMemo(payload);
     const jobPayload = {
       customer: onlineSalesCustomerRef(),
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
-      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
-      memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
       billAddress: mapAddress(payload?.billing_address),
       shipAddress: mapAddress(payload?.shipping_address),
       lines: allLines,
     };
+
+    if (memo) jobPayload.memo = memo;
+
+    if (taxDetails) {
+      jobPayload.ItemSalesTaxRef = taxDetails.itemSalesTaxRef;
+      if (taxDetails.salesTaxPercentage) jobPayload.SalesTaxPercentage = taxDetails.salesTaxPercentage;
+      jobPayload.SalesTaxTotal = taxDetails.salesTaxTotal;
+      if (taxDetails.applyTaxAfterDiscount != null)
+        jobPayload.ApplyTaxAfterDiscount = taxDetails.applyTaxAfterDiscount;
+    }
 
     if (classRef) jobPayload.ClassRef = classRef;
     if (arAccountRef) jobPayload.ARAccountRef = arAccountRef;

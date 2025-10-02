@@ -1,6 +1,13 @@
 'use strict';
 
-const { escapeXml, qbxmlEnvelope, itemRefXml, refXml, addressXml, formatMoney } = require('./qbd.xmlUtils');
+const {
+  escapeXml,
+  qbxmlEnvelope,
+  itemRefXml,
+  refXml,
+  addressXml,
+  formatMoney,
+} = require('./qbd.xmlUtils');
 
 function optionalTag(tag, value) {
   if (value == null) return '';
@@ -14,6 +21,18 @@ function optionalDate(tag, value) {
   const dt = new Date(value);
   if (Number.isNaN(dt.valueOf())) return '';
   return `<${tag}>${escapeXml(dt.toISOString().slice(0, 10))}</${tag}>`;
+}
+
+function optionalMoney(tag, value) {
+  if (value == null) return '';
+  const str = formatMoney(value);
+  if (str == null) return '';
+  return `<${tag}>${str}</${tag}>`;
+}
+
+function optionalBool(tag, value) {
+  if (value == null) return '';
+  return `<${tag}>${value ? 'true' : 'false'}</${tag}>`;
 }
 
 function lineXml(line = {}) {
@@ -103,6 +122,13 @@ function buildInvoiceXML(payload = {}, qbxmlVer = process.env.QBXML_VER || '16.0
         ${refXml('SalesRepRef', payload.salesRep || payload.SalesRepRef)}
         ${refXml('ShipMethodRef', payload.shipMethod || payload.ShipMethodRef)}
         ${optionalTag('FOB', payload.fob || payload.FOB)}
+        ${refXml('ItemSalesTaxRef', payload.itemSalesTaxRef || payload.ItemSalesTaxRef)}
+        ${optionalBool(
+          'ApplyTaxAfterDiscount',
+          payload.applyTaxAfterDiscount ?? payload.ApplyTaxAfterDiscount
+        )}
+        ${optionalTag('SalesTaxPercentage', payload.salesTaxPercentage || payload.SalesTaxPercentage)}
+        ${optionalMoney('SalesTaxTotal', payload.salesTaxTotal || payload.SalesTaxTotal)}
         ${lines.join('')}
       </InvoiceAdd>
     </InvoiceAddRq>
