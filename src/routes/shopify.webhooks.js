@@ -68,6 +68,62 @@ function envRef(base, fallbackFullName) {
   return null;
 }
 
+function resolveTaxCodeRef(taxable) {
+  if (taxable) return envRef('QBD_SHOPIFY_TAX_CODE_TAXABLE', 'TAX');
+  return envRef('QBD_SHOPIFY_TAX_CODE_NONTAXABLE', 'NON');
+}
+
+function isLineTaxable(source) {
+  if (!source || typeof source !== 'object') return false;
+  if (source.taxable === true) return true;
+  if (source.taxable === false) return false;
+  const taxLines = Array.isArray(source.tax_lines) ? source.tax_lines : [];
+  for (const tl of taxLines) {
+    const price = parseMoney(tl?.price ?? tl?.price_set?.shop_money?.amount);
+    if (price != null && price > 0) return true;
+    const rate = parseMoney(tl?.rate);
+    if (rate != null && rate > 0) return true;
+  }
+  return false;
+}
+
+function lineTaxCodeRef(source) {
+  const taxable = isLineTaxable(source);
+  return resolveTaxCodeRef(taxable);
+}
+
+function buildSalesTaxItem(order) {
+  const taxLines = Array.isArray(order?.tax_lines) ? order.tax_lines : [];
+  for (const tl of taxLines) {
+    const title = String(tl?.title || '').trim();
+    if (!title) continue;
+    return { FullName: title };
+  }
+  return envRef('QBD_SHOPIFY_TAX_ITEM');
+}
+
+function extractOrderNumber(order) {
+  const name = order?.name;
+  if (name) {
+    const trimmed = String(name).trim();
+    if (trimmed) return trimmed;
+  }
+
+  const rawOrderNumber = order?.order_number ?? order?.order?.order_number;
+  if (rawOrderNumber != null && rawOrderNumber !== '') {
+    const str = String(rawOrderNumber).trim();
+    if (str) return str.startsWith('#') ? str : `#${str}`;
+  }
+
+  const fallbackId = order?.id ?? order?.order_id;
+  if (fallbackId != null) {
+    const str = String(fallbackId).trim();
+    if (str) return str;
+  }
+
+  return null;
+}
+
 function mapAddress(addr) {
   if (!addr || typeof addr !== 'object') return null;
   const lines = [];
@@ -113,7 +169,7 @@ function buildRefNumber(primary, fallbackPrefix, fallbackValue) {
 }
 
 function buildCustomerRef(order) {
-  const envCustomer = envRef('QBD_SHOPIFY_CUSTOMER');
+  const envCustomer = envRef('QBD_SHOPIFY_CUSTOMER', 'ONLINE SALES');
   if (envCustomer) return envCustomer;
 
   const parts = [];
@@ -139,18 +195,20 @@ function buildCustomerRef(order) {
 }
 
 function buildShippingLines(order) {
-  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM');
+  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM', 'SHIPPING WITH GUARANTEE');
   if (!ref) return [];
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
   const out = [];
   for (const ship of lines) {
     const amount = parseMoney(ship?.price ?? ship?.price_set?.shop_money?.amount);
     if (!amount || amount <= 0) continue;
+    const salesTaxCodeRef = lineTaxCodeRef(ship);
     out.push({
       ItemRef: { ...ref },
-      Desc: ship?.title || 'Shipping',
+      Desc: ship?.title || 'CHARGE TO BE APPLIED TO ANY SHIP ITEM',
       Quantity: 1,
       Rate: amount,
+      ...(salesTaxCodeRef ? { SalesTaxCodeRef: salesTaxCodeRef } : {}),
     });
   }
   return out;
@@ -161,11 +219,13 @@ function buildDiscountLine(order) {
   if (!discount || discount <= 0) return null;
   const ref = envRef('QBD_SHOPIFY_DISCOUNT_ITEM');
   if (!ref) return null;
+  const salesTaxCodeRef = resolveTaxCodeRef(true);
   return {
     ItemRef: { ...ref },
     Desc: 'Shopify discount',
     Quantity: 1,
     Rate: -discount,
+    ...(salesTaxCodeRef ? { SalesTaxCodeRef: salesTaxCodeRef } : {}),
   };
 }
 
@@ -202,6 +262,8 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
       Quantity: qty,
     };
     if (rate != null) line.Rate = rate;
+    const salesTaxCodeRef = lineTaxCodeRef(li);
+    if (salesTaxCodeRef) line.SalesTaxCodeRef = salesTaxCodeRef;
     matched.push(line);
   }
 
@@ -279,24 +341,32 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     }
 
     const customerSource = payload?.order ? payload.order : { ...payload, id: payload?.order_id || payload?.id };
+    const orderNumber = extractOrderNumber(payload);
+    const formattedOrderNumber = orderNumber
+      ? orderNumber.startsWith('#')
+        ? orderNumber
+        : `#${orderNumber}`
+      : null;
+    const poNumber = formattedOrderNumber ? `Shopify ${formattedOrderNumber}` : null;
+    const memo = formattedOrderNumber || orderNumber || null;
+    const salesTaxItem = buildSalesTaxItem(payload);
+    const requestId = payload?.id ? `INV-${payload.id}` : payload?.order_id ? `INV-${payload.order_id}` : undefined;
+
     const jobPayload = {
       customer: buildCustomerRef(customerSource),
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
-      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
-      memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
+      requestId,
+      poNumber,
+      memo,
       billAddress: mapAddress(payload?.billing_address),
       shipAddress: mapAddress(payload?.shipping_address),
       lines: allLines,
     };
 
-    const paymentMethodRef = envRef('QBD_SHOPIFY_PAYMENT_METHOD');
-    if (paymentMethodRef) jobPayload.paymentMethod = paymentMethodRef;
-
-    const depositAccountRef = envRef('QBD_SHOPIFY_DEPOSIT_ACCOUNT');
-    if (depositAccountRef) jobPayload.depositToAccount = depositAccountRef;
+    if (salesTaxItem) jobPayload.salesTaxItem = salesTaxItem;
 
     await enqueueJob({
-      type: 'salesReceiptAdd',
+      type: 'invoiceAdd',
       source: 'shopify-order',
       createdAt: new Date().toISOString(),
       payload: jobPayload,
