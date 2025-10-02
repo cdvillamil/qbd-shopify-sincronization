@@ -11,7 +11,9 @@ const { enqueueJob, LOG_DIR } = require('../services/jobQueue');
 
 const router = express.Router();
 
-const SHIPPING_DESC_FALLBACK = 'CHARGE TO BE APPLIED ON SHIP ITEM';
+const SHIPPING_DESC_FALLBACK = 'CHARGE TO BE APPLIED TO ANY SHIP ITEM';
+const SHIPPING_ITEM_FALLBACK = 'SHIPPING WITH GUARANTEE';
+const SHIPPING_TAX_CODE_FALLBACK = 'NON';
 
 // === snapshot de QBD para conocer QOH (QuantityOnHand)
 const INV_PATH = path.join(LOG_DIR, 'last-inventory.json');
@@ -119,7 +121,7 @@ function onlineSalesCustomerRef() {
 }
 
 function buildShippingLines(order) {
-  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM');
+  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM', SHIPPING_ITEM_FALLBACK);
   if (!ref) return [];
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
   const out = [];
@@ -132,13 +134,20 @@ function buildShippingLines(order) {
     const resolvedDesc = descEnv && descEnv.trim() ? descEnv.trim() : null;
     const sourceDesc = typeof ship?.title === 'string' ? ship.title.trim() : '';
     const desc = resolvedDesc || sourceDesc || SHIPPING_DESC_FALLBACK;
-    out.push({
+    const taxCodeEnv =
+      process.env.QBD_SHOPIFY_SHIPPING_TAX_CODE || process.env.QBD_SHOPIFY_SHIPPING_TAXCODE;
+    const taxCode = typeof taxCodeEnv === 'string' && taxCodeEnv.trim()
+      ? taxCodeEnv.trim()
+      : SHIPPING_TAX_CODE_FALLBACK;
+    const line = {
       ItemRef: { ...ref },
       Desc: desc,
       Quantity: 1,
       Rate: amount,
       ShopifyPurchasePrice: amount,
-    });
+    };
+    if (taxCode) line.SalesTaxCodeRef = { FullName: taxCode };
+    out.push(line);
   }
   return out;
 }
@@ -210,6 +219,11 @@ function buildOrderTaxDetails(order) {
 }
 
 function buildOrderMemo(order) {
+  if (!order || typeof order !== 'object') return null;
+  const orderNumber = order?.order_number;
+  if (orderNumber != null && String(orderNumber).trim()) {
+    return String(orderNumber).trim();
+  }
   const name = typeof order?.name === 'string' ? order.name.trim() : '';
   if (name) return name;
   if (order?.order_number != null) return `#${order.order_number}`;
