@@ -139,16 +139,18 @@ function buildCustomerRef(order) {
 }
 
 function buildShippingLines(order) {
-  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM');
+  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM', 'SHIPPING WITH GUARANTEE');
   if (!ref) return [];
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
   const out = [];
   for (const ship of lines) {
     const amount = parseMoney(ship?.price ?? ship?.price_set?.shop_money?.amount);
     if (!amount || amount <= 0) continue;
+    const description =
+      ship?.title || process.env.QBD_SHOPIFY_SHIPPING_DESC || 'CHARGE TO BE APPLIED TO ANY SHIP ITEM';
     out.push({
       ItemRef: { ...ref },
-      Desc: ship?.title || 'Shipping',
+      Desc: description,
       Quantity: 1,
       Rate: amount,
     });
@@ -169,10 +171,11 @@ function buildDiscountLine(order) {
   };
 }
 
-function collectOrderLines(order, inventoryItems, fieldsPriority) {
+function collectOrderLines(order, inventoryItems, fieldsPriority, options = {}) {
   const linesIn = Array.isArray(order?.line_items) ? order.line_items : [];
   const matched = [];
   const notFound = [];
+  const fallbackItemRef = options?.fallbackItemRef ? { ...options.fallbackItemRef } : null;
 
   for (const li of linesIn) {
     const sku = String(li?.sku || '').trim();
@@ -180,13 +183,11 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
     if (!sku || !qty) continue;
 
     const item = resolveSkuToItem(inventoryItems || [], sku, fieldsPriority);
-    if (!item || (!item.ListID && !item.FullName && !item.Name)) {
+    let ref = item ? toItemRef(item) : null;
+    if (!ref && fallbackItemRef) {
+      ref = { ...fallbackItemRef };
       notFound.push(sku);
-      continue;
-    }
-
-    const ref = toItemRef(item);
-    if (!ref) {
+    } else if (!ref) {
       notFound.push(sku);
       continue;
     }
@@ -266,10 +267,33 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const payload = JSON.parse(req.body.toString('utf8'));
     const inventory = loadInventory();
     const fieldsPriority = skuFields();
+    const fallbackProductItemRef = envRef('QBD_SHOPIFY_PRODUCT_ITEM', 'PRUEBA-INVOICE');
 
-    const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority);
+    const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority, {
+      fallbackItemRef: fallbackProductItemRef || undefined,
+    });
     const shippingLines = buildShippingLines(payload);
     const discountLine = buildDiscountLine(payload);
+
+    const productTaxCodeRef = envRef('QBD_SHOPIFY_PRODUCT_TAX_CODE', 'TAX');
+    const shippingTaxCodeRef = envRef('QBD_SHOPIFY_SHIPPING_TAX_CODE', 'NON');
+
+    if (productTaxCodeRef) {
+      matched.forEach((line) => {
+        if (!line.SalesTaxCodeRef) line.SalesTaxCodeRef = { ...productTaxCodeRef };
+      });
+    }
+
+    if (shippingTaxCodeRef) {
+      shippingLines.forEach((line) => {
+        line.SalesTaxCodeRef = { ...shippingTaxCodeRef };
+      });
+    }
+
+    if (discountLine && !discountLine.SalesTaxCodeRef) {
+      const discountTaxCode = productTaxCodeRef || shippingTaxCodeRef;
+      if (discountTaxCode) discountLine.SalesTaxCodeRef = { ...discountTaxCode };
+    }
 
     const allLines = [...matched, ...shippingLines];
     if (discountLine) allLines.push(discountLine);
@@ -278,25 +302,32 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       return res.status(200).json({ ok: true, queued: false, notFound });
     }
 
-    const customerSource = payload?.order ? payload.order : { ...payload, id: payload?.order_id || payload?.id };
+    const customerRef = envRef('QBD_SHOPIFY_INVOICE_CUSTOMER', 'ONLINE SALES');
+    const itemSalesTaxRef = envRef('QBD_SHOPIFY_SALES_TAX_ITEM', 'FL TAX 7%');
+    const customerSource =
+      payload?.order ? payload.order : { ...payload, id: payload?.order_id || payload?.id };
+    const shopifyOrderId = payload?.id ?? payload?.order_id ?? null;
+    const shopifyOrderNumber = payload?.order_number ?? payload?.name ?? null;
     const jobPayload = {
-      customer: buildCustomerRef(customerSource),
+      customer: customerRef ? { ...customerRef } : buildCustomerRef(customerSource),
+      itemSalesTaxRef: itemSalesTaxRef ? { ...itemSalesTaxRef } : undefined,
+      shopifyOrderId,
+      shopifyOrderNumber,
+      requestId: shopifyOrderId != null ? `INV-${shopifyOrderId}` : undefined,
+      poNumber: shopifyOrderNumber || undefined,
+      memo:
+        shopifyOrderNumber || shopifyOrderId
+          ? `Pedido Shopify #${shopifyOrderNumber || shopifyOrderId}`
+          : undefined,
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
-      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
-      memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
+      refNumber: buildRefNumber(shopifyOrderNumber, 'SO', shopifyOrderId),
       billAddress: mapAddress(payload?.billing_address),
       shipAddress: mapAddress(payload?.shipping_address),
       lines: allLines,
     };
 
-    const paymentMethodRef = envRef('QBD_SHOPIFY_PAYMENT_METHOD');
-    if (paymentMethodRef) jobPayload.paymentMethod = paymentMethodRef;
-
-    const depositAccountRef = envRef('QBD_SHOPIFY_DEPOSIT_ACCOUNT');
-    if (depositAccountRef) jobPayload.depositToAccount = depositAccountRef;
-
     await enqueueJob({
-      type: 'salesReceiptAdd',
+      type: 'invoiceAdd',
       source: 'shopify-order',
       createdAt: new Date().toISOString(),
       payload: jobPayload,
