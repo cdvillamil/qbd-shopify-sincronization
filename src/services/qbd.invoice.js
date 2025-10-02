@@ -35,6 +35,15 @@ function optionalBool(tag, value) {
   return `<${tag}>${value ? 'true' : 'false'}</${tag}>`;
 }
 
+function sanitizeRequestId(value) {
+  if (value == null) return null;
+  const str = String(value).trim();
+  if (!str) return null;
+  const cleaned = str.replace(/[^0-9A-Za-z_\-:]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, 50);
+}
+
 function lineXml(line = {}) {
   if (!line) return '';
 
@@ -102,10 +111,15 @@ function buildInvoiceXML(payload = {}, qbxmlVer = process.env.QBXML_VER || '16.0
   const lines = Array.isArray(payload.lines) ? payload.lines.map(lineXml).filter(Boolean) : [];
   if (!lines.length) return '';
 
+  const requestId =
+    sanitizeRequestId(
+      payload.requestId || payload.requestID || payload.RequestID || payload.request_id
+    ) || 'invoice-1';
+
   const body = `
 <QBXML>
   <QBXMLMsgsRq onError="stopOnError">
-    <InvoiceAddRq requestID="invoice-1">
+    <InvoiceAddRq requestID="${escapeXml(requestId)}">
       <InvoiceAdd>
         ${refXml('CustomerRef', payload.customer || payload.CustomerRef)}
         ${refXml('ClassRef', payload.classRef || payload.ClassRef)}

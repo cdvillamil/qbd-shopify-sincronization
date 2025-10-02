@@ -121,35 +121,50 @@ function onlineSalesCustomerRef() {
 }
 
 function buildShippingLines(order) {
-  const ref = envRef('QBD_SHOPIFY_SHIPPING_ITEM', SHIPPING_ITEM_FALLBACK);
-  if (!ref) return [];
   const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
-  const out = [];
+  if (!lines.length) return [];
+
+  let total = 0;
   for (const ship of lines) {
     const amount = parseMoney(
       ship?.price ?? ship?.price_set?.shop_money?.amount ?? ship?.discounted_price
     );
     if (amount == null) continue;
-    const descEnv = process.env.QBD_SHOPIFY_SHIPPING_DESC;
-    const resolvedDesc = descEnv && descEnv.trim() ? descEnv.trim() : null;
-    const sourceDesc = typeof ship?.title === 'string' ? ship.title.trim() : '';
-    const desc = resolvedDesc || sourceDesc || SHIPPING_DESC_FALLBACK;
-    const taxCodeEnv =
-      process.env.QBD_SHOPIFY_SHIPPING_TAX_CODE || process.env.QBD_SHOPIFY_SHIPPING_TAXCODE;
-    const taxCode = typeof taxCodeEnv === 'string' && taxCodeEnv.trim()
-      ? taxCodeEnv.trim()
-      : SHIPPING_TAX_CODE_FALLBACK;
-    const line = {
-      ItemRef: { ...ref },
-      Desc: desc,
-      Quantity: 1,
-      Rate: amount,
-      ShopifyPurchasePrice: amount,
-    };
-    if (taxCode) line.SalesTaxCodeRef = { FullName: taxCode };
-    out.push(line);
+    total += amount;
   }
-  return out;
+
+  if (!total) return [];
+
+  total = Math.round(total * 100) / 100;
+
+  const envItem = envRef('QBD_SHOPIFY_SHIPPING_ITEM');
+  const itemRef = envItem ? { ...envItem } : { FullName: SHIPPING_ITEM_FALLBACK };
+
+  if (!itemRef.ListID && !itemRef.FullName) {
+    itemRef.FullName = SHIPPING_ITEM_FALLBACK;
+  }
+
+  const descEnv = process.env.QBD_SHOPIFY_SHIPPING_DESC;
+  const resolvedDesc = descEnv && descEnv.trim() ? descEnv.trim() : null;
+  const desc = resolvedDesc || SHIPPING_DESC_FALLBACK;
+
+  const taxCodeEnv =
+    process.env.QBD_SHOPIFY_SHIPPING_TAX_CODE || process.env.QBD_SHOPIFY_SHIPPING_TAXCODE;
+  const taxCode = typeof taxCodeEnv === 'string' && taxCodeEnv.trim()
+    ? taxCodeEnv.trim()
+    : SHIPPING_TAX_CODE_FALLBACK;
+
+  const line = {
+    ItemRef: itemRef,
+    Desc: desc,
+    Quantity: 1,
+    Rate: total,
+    ShopifyPurchasePrice: total,
+  };
+
+  if (taxCode) line.SalesTaxCodeRef = { FullName: taxCode };
+
+  return [line];
 }
 
 function buildDiscountLine(order) {
@@ -218,17 +233,40 @@ function buildOrderTaxDetails(order) {
   };
 }
 
-function buildOrderMemo(order) {
+function resolveShopifyOrderNumber(order) {
   if (!order || typeof order !== 'object') return null;
   const orderNumber = order?.order_number;
   if (orderNumber != null && String(orderNumber).trim()) {
     return String(orderNumber).trim();
   }
   const name = typeof order?.name === 'string' ? order.name.trim() : '';
-  if (name) return name;
-  if (order?.order_number != null) return `#${order.order_number}`;
-  if (order?.id != null) return String(order.id);
+  if (name) {
+    const cleanedName = name.replace(/^Shopify\s*#/i, '').replace(/^#/, '').trim();
+    if (cleanedName) return cleanedName;
+    return name;
+  }
+  if (order?.id != null) return String(order.id).trim();
   return null;
+}
+
+function buildOrderMemo(order) {
+  const number = resolveShopifyOrderNumber(order);
+  return number || null;
+}
+
+function buildOrderPoNumber(order) {
+  const number = resolveShopifyOrderNumber(order);
+  if (!number) return null;
+  return `Shopify #${number}`;
+}
+
+function buildInvoiceRequestId(order) {
+  if (!order || typeof order !== 'object') return null;
+  const base = resolveShopifyOrderNumber(order) || (order?.id != null ? String(order.id).trim() : '');
+  if (!base) return null;
+  const cleaned = base.replace(/[^0-9A-Za-z-]/g, '');
+  if (!cleaned) return null;
+  return `INV-${cleaned}`.slice(0, 50);
 }
 
 function collectOrderLines(order, inventoryItems, fieldsPriority) {
@@ -355,6 +393,8 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
 
     const memo = buildOrderMemo(payload);
+    const poNumber = buildOrderPoNumber(payload);
+    const requestId = buildInvoiceRequestId(payload);
     const jobPayload = {
       customer: onlineSalesCustomerRef(),
       txnDate: toQBDate(payload?.processed_at || payload?.created_at),
@@ -364,6 +404,8 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     };
 
     if (memo) jobPayload.memo = memo;
+    if (poNumber) jobPayload.poNumber = poNumber;
+    if (requestId) jobPayload.requestId = requestId;
 
     if (taxDetails) {
       jobPayload.ItemSalesTaxRef = taxDetails.itemSalesTaxRef;
