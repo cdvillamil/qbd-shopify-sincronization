@@ -93,13 +93,13 @@ function buildInvoiceXML(payload = {}, qbxmlVer = process.env.QBXML_VER || '16.0
     resolveRefXml('TemplateRef', payload.TemplateRef),
     optionalTag('TxnDate', payload.txnDate || payload.TxnDate),
     optionalTag('RefNumber', payload.refNumber || payload.RefNumber),
-    optionalTag('PONumber', poNumber),
-    optionalTag('Memo', memo),
     resolveRefXml('TermsRef', payload.TermsRef),
     resolveRefXml('SalesRepRef', payload.SalesRepRef),
-    itemSalesTaxRef,
     billAddress,
     shipAddress,
+    itemSalesTaxRef,
+    optionalTag('PONumber', poNumber),
+    optionalTag('Memo', memo),
     ...lines,
   ].filter(Boolean);
 
