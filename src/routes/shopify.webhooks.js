@@ -238,23 +238,33 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
 // topic: orders/paid   (también puedes apuntar orders/create si prefieres)
 router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
   try {
-    const order = req.body;
+    // 1) Verifica HMAC (opcional pero recomendado)
+    const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+    const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
+    if (!verifyHmac(secret, req.body, hmacHeader)) {
+      console.warn('orders/paid: invalid HMAC');
+      return res.status(401).send('Invalid HMAC');
+    }
 
-    // Identificadores y fechas
-    const orderNumber = String(order?.order_number ?? order?.name ?? order?.id);
+    // 2) Parsear el Buffer crudo a JSON
+    const order = JSON.parse(req.body.toString('utf8'));
+
+    // 3) Identificadores y fecha
+    const orderNumberRaw = order?.order_number ?? order?.name ?? order?.id;
+    const orderNumber = orderNumberRaw != null ? String(orderNumberRaw) : '';
     const txnDateISO = order?.processed_at || order?.created_at || new Date().toISOString();
     const txnDate = toQBDate ? toQBDate(txnDateISO) : txnDateISO.slice(0, 10); // YYYY-MM-DD
 
-    // Líneas de productos con Rate = precio unitario de Shopify (SIN impuestos)
+    // 4) Líneas de producto con Rate = precio unitario de Shopify (sin impuestos)
     const productLines = (order?.line_items || []).map(li => ({
-      ItemRef: { FullName: li?.sku || li?.title || 'UNKNOWN-SKU' }, // ajusta a tu mapping SKU↔QBD
+      ItemRef: { FullName: li?.sku || li?.title || 'UNKNOWN-SKU' }, // ajusta si mapeas a ListID
       Desc: li?.title || li?.sku || '',
       Quantity: Number(li?.quantity || 0),
-      Rate: Number(li?.price ?? li?.price_set?.shop_money?.amount ?? 0), // <— PRECIO SHOPIFY
+      Rate: Number(li?.price ?? li?.price_set?.shop_money?.amount ?? 0),
       SalesTaxCodeRef: { FullName: li?.taxable ? 'TAX' : 'NON' },
     })).filter(l => l.Quantity > 0);
 
-    // Línea de envío (opcional)
+    // 5) Envío (opcional)
     const shippingTotal = (order?.shipping_lines || [])
       .reduce((sum, s) => sum + Number(s?.price ?? s?.price_set?.shop_money?.amount ?? 0), 0);
 
@@ -268,50 +278,45 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
         }]
       : [];
 
-    // Descuento total (opcional)
-    // Opción A (recomendada): si tu builder soporta DiscountLineAdd usando payload.discountAmount
+    // 6) Descuento total (opcional, si tu builder lo soporta como DiscountLineAdd)
     const discountAmount = Number(order?.total_discounts || 0);
     const discountPayload = (discountAmount > 0)
       ? { discountAmount, discountDesc: (order?.discount_codes?.map(d => d?.code).join(', ') || 'Discounts') }
       : {};
 
-    // Opción B (alternativa): si prefieres usar un ítem de descuento como línea negativa, descomenta:
-    // const discountLine = (discountAmount > 0 && process.env.QBD_DISCOUNT_ITEM_NAME)
-    //   ? [{
-    //       ItemRef: { FullName: process.env.QBD_DISCOUNT_ITEM_NAME },
-    //       Desc: (order?.discount_codes?.map(d => d?.code).join(', ') || 'Discounts'),
-    //       Quantity: 1,
-    //       Rate: -Math.abs(discountAmount),
-    //       SalesTaxCodeRef: { FullName: 'NON' },
-    //     }]
-    //   : [];
-
+    // 7) Ensambla líneas finales
     const lines = [
       ...productLines,
       ...shippingLine,
-      // ...discountLine, // si usas la opción B
+      // si usas ítem de descuento como línea negativa, agrégalo aquí en vez del payload de descuento total
     ];
 
-    // Impuesto de compañía (opcional)
+    // 8) Si no hay líneas, no encolar (evita invoice vacío)
+    if (!lines.length) {
+      console.warn('orders/paid: no valid lines; skipping invoice enqueue');
+      return res.status(200).send('no-lines');
+    }
+
+    // 9) Impuesto de compañía (opcional)
     const itemSalesTaxRef = process.env.QBD_COMPANY_TAX_NAME
       ? { FullName: process.env.QBD_COMPANY_TAX_NAME }
       : undefined;
 
-    // Customer/Job fijo para e-commerce
+    // 10) Customer/Job fijo para e-commerce
     const customerRef = (typeof onlineSalesCustomerRef === 'function')
-      ? onlineSalesCustomerRef() // tu helper devuelve { FullName: 'ONLINE SALES' } o ListID
+      ? onlineSalesCustomerRef()
       : { FullName: 'ONLINE SALES' };
 
-    // Payload del job para el builder de qbXML (SIN RefNumber → QBD asigna consecutivo)
+    // 11) Payload del job SIN refNumber (QBD asigna consecutivo); memo = orderNumber
     const jobPayload = {
       customer: customerRef,
       txnDate,
-      memo: orderNumber,                          // <-- SOLO número de orden
+      memo: orderNumber || '', // evita "undefined"
       billAddress: mapAddress ? mapAddress(order?.billing_address) : undefined,
       shipAddress: mapAddress ? mapAddress(order?.shipping_address) : undefined,
       itemSalesTaxRef,
       lines,
-      ...discountPayload,                         // si el builder soporta DiscountLineAdd
+      ...discountPayload,
     };
 
     await enqueueJob({
@@ -321,14 +326,13 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       payload: jobPayload,
     });
 
-    // Importante: NO crear ReceivePayment aquí → la factura queda ABIERTA
     return res.status(200).send('ok');
   } catch (err) {
     console.error('orders/paid handler error:', err);
-    // Responder 200 para evitar reintentos de Shopify, pero registrar el fallo
     return res.status(200).send('ok');
   }
 });
+
 
 // ===================================================
 //  B) inventory_levels/update (ajustes manuales/restock)
