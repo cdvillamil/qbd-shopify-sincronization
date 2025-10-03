@@ -380,10 +380,17 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         (typeof it?.Name === 'string' && it.Name.trim()) ||
         sku;
 
+      const resolvedOrderNumber =
+        payload?.shopifyOrderNumber ??
+        payload?.order_number ??
+        payload?.name ??
+        payload?.inventory_level?.origin_document_number ??
+        null;
+
       const invoicePayload = {
         customer: onlineSalesCustomerRef(),
         txnDate: toQBDate(payload?.updated_at || inventoryLevel?.updated_at || new Date()),
-        memo: `Shopify auto invoice for ${sku}`,
+        memo: resolvedOrderNumber ? String(resolvedOrderNumber) : `Shopify auto invoice for ${sku}`,
         refNumber: buildRefNumber(
           payload?.order_number ?? payload?.name ?? payload?.inventory_level?.origin_document_number,
           'INV',
@@ -397,6 +404,21 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
           },
         ],
       };
+
+      const rateFromPayload = parseMoney(
+        payload?.shopifyPrice ??
+          payload?.price ??
+          payload?.unitPrice ??
+          payload?.unit_price ??
+          payload?.inventory_level?.price ??
+          payload?.inventory_level?.cost ??
+          payload?.amount ??
+          payload?.line_price
+      );
+
+      if (rateFromPayload != null) {
+        invoicePayload.lines[0].Rate = rateFromPayload;
+      }
 
       if (classRef) invoicePayload.ClassRef = classRef;
       if (arAccountRef) invoicePayload.ARAccountRef = arAccountRef;
