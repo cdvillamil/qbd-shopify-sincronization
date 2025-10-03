@@ -238,47 +238,81 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
 // topic: orders/paid   (también puedes apuntar orders/create si prefieres)
 router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
   try {
-    if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
-      return res.status(401).send('Invalid HMAC');
+    const order = req.body;
 
-    const payload = JSON.parse(req.body.toString('utf8'));
-    const inventory = loadInventory();
-    const fieldsPriority = skuFields();
+    // Identificadores y fechas
+    const orderNumber = String(order?.order_number ?? order?.name ?? order?.id);
+    const txnDateISO = order?.processed_at || order?.created_at || new Date().toISOString();
+    const txnDate = toQBDate ? toQBDate(txnDateISO) : txnDateISO.slice(0, 10); // YYYY-MM-DD
 
-    const { matched, notFound } = collectOrderLines(payload, inventory.items, fieldsPriority);
-    const shippingLines = buildShippingLines(payload);
-    const discountLine = buildDiscountLine(payload);
+    // Líneas de productos con Rate = precio unitario de Shopify (SIN impuestos)
+    const productLines = (order?.line_items || []).map(li => ({
+      ItemRef: { FullName: li?.sku || li?.title || 'UNKNOWN-SKU' }, // ajusta a tu mapping SKU↔QBD
+      Desc: li?.title || li?.sku || '',
+      Quantity: Number(li?.quantity || 0),
+      Rate: Number(li?.price ?? li?.price_set?.shop_money?.amount ?? 0), // <— PRECIO SHOPIFY
+      SalesTaxCodeRef: { FullName: li?.taxable ? 'TAX' : 'NON' },
+    })).filter(l => l.Quantity > 0);
 
-    const allLines = [...matched, ...shippingLines];
-    if (discountLine) allLines.push(discountLine);
+    // Línea de envío (opcional)
+    const shippingTotal = (order?.shipping_lines || [])
+      .reduce((sum, s) => sum + Number(s?.price ?? s?.price_set?.shop_money?.amount ?? 0), 0);
 
-    if (!allLines.length) {
-      return res.status(200).json({ ok: true, queued: false, notFound });
-    }
+    const shippingLine = (shippingTotal > 0)
+      ? [{
+          ItemRef: { FullName: process.env.QBD_SHIPPING_ITEM_NAME || 'SHIPPING WITH GUARANTEE' },
+          Desc: (order?.shipping_lines?.[0]?.title) || 'Shipping',
+          Quantity: 1,
+          Rate: Number(shippingTotal),
+          SalesTaxCodeRef: { FullName: process.env.QBD_SHIPPING_TAXABLE === 'true' ? 'TAX' : 'NON' },
+        }]
+      : [];
 
-    const classRef = envRef('QBD_SHOPIFY_CLASS');
-    const arAccountRef = envRef('QBD_SHOPIFY_AR_ACCOUNT');
-    const termsRef = envRef('QBD_SHOPIFY_TERMS');
-    const templateRef = envRef('QBD_SHOPIFY_TEMPLATE');
-    const salesRepRef = envRef('QBD_SHOPIFY_SALESREP');
-    const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
+    // Descuento total (opcional)
+    // Opción A (recomendada): si tu builder soporta DiscountLineAdd usando payload.discountAmount
+    const discountAmount = Number(order?.total_discounts || 0);
+    const discountPayload = (discountAmount > 0)
+      ? { discountAmount, discountDesc: (order?.discount_codes?.map(d => d?.code).join(', ') || 'Discounts') }
+      : {};
 
+    // Opción B (alternativa): si prefieres usar un ítem de descuento como línea negativa, descomenta:
+    // const discountLine = (discountAmount > 0 && process.env.QBD_DISCOUNT_ITEM_NAME)
+    //   ? [{
+    //       ItemRef: { FullName: process.env.QBD_DISCOUNT_ITEM_NAME },
+    //       Desc: (order?.discount_codes?.map(d => d?.code).join(', ') || 'Discounts'),
+    //       Quantity: 1,
+    //       Rate: -Math.abs(discountAmount),
+    //       SalesTaxCodeRef: { FullName: 'NON' },
+    //     }]
+    //   : [];
+
+    const lines = [
+      ...productLines,
+      ...shippingLine,
+      // ...discountLine, // si usas la opción B
+    ];
+
+    // Impuesto de compañía (opcional)
+    const itemSalesTaxRef = process.env.QBD_COMPANY_TAX_NAME
+      ? { FullName: process.env.QBD_COMPANY_TAX_NAME }
+      : undefined;
+
+    // Customer/Job fijo para e-commerce
+    const customerRef = (typeof onlineSalesCustomerRef === 'function')
+      ? onlineSalesCustomerRef() // tu helper devuelve { FullName: 'ONLINE SALES' } o ListID
+      : { FullName: 'ONLINE SALES' };
+
+    // Payload del job para el builder de qbXML (SIN RefNumber → QBD asigna consecutivo)
     const jobPayload = {
-      customer: onlineSalesCustomerRef(),
-      txnDate: toQBDate(payload?.processed_at || payload?.created_at),
-      refNumber: buildRefNumber(payload?.order_number ?? payload?.name, 'SO', payload?.id),
-      memo: `Shopify order ${payload?.name || payload?.order_number || payload?.id}`,
-      billAddress: mapAddress(payload?.billing_address),
-      shipAddress: mapAddress(payload?.shipping_address),
-      lines: allLines,
+      customer: customerRef,
+      txnDate,
+      memo: orderNumber,                          // <-- SOLO número de orden
+      billAddress: mapAddress ? mapAddress(order?.billing_address) : undefined,
+      shipAddress: mapAddress ? mapAddress(order?.shipping_address) : undefined,
+      itemSalesTaxRef,
+      lines,
+      ...discountPayload,                         // si el builder soporta DiscountLineAdd
     };
-
-    if (classRef) jobPayload.ClassRef = classRef;
-    if (arAccountRef) jobPayload.ARAccountRef = arAccountRef;
-    if (termsRef) jobPayload.TermsRef = termsRef;
-    if (templateRef) jobPayload.TemplateRef = templateRef;
-    if (salesRepRef) jobPayload.SalesRepRef = salesRepRef;
-    if (shipMethodRef) jobPayload.ShipMethodRef = shipMethodRef;
 
     await enqueueJob({
       type: 'invoiceAdd',
@@ -287,10 +321,12 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       payload: jobPayload,
     });
 
-    return res.status(200).json({ ok: true, queued: true, lines: allLines.length, notFound });
-  } catch (e) {
-    console.error('orders/paid webhook error:', e);
-    return res.status(500).send('error');
+    // Importante: NO crear ReceivePayment aquí → la factura queda ABIERTA
+    return res.status(200).send('ok');
+  } catch (err) {
+    console.error('orders/paid handler error:', err);
+    // Responder 200 para evitar reintentos de Shopify, pero registrar el fallo
+    return res.status(200).send('ok');
   }
 });
 
@@ -299,163 +335,61 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
 // ===================================================
 router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
   try {
-    if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256')))
-      return res.status(401).send('Invalid HMAC');
-    console.log('[WEBHOOK] HIT inventory_levels/update');
-    const payload = JSON.parse(req.body.toString('utf8'));
-    const inventoryLevel =
-      payload && typeof payload.inventory_level === 'object' ? payload.inventory_level : null;
-    const invItemId = payload?.inventory_item_id ?? inventoryLevel?.inventory_item_id;
-    const resolvedAvailable =
-      toNumber(payload?.available) ?? toNumber(inventoryLevel?.available);
-    const resolvedAdjustment =
-      toNumber(payload?.available_adjustment) ?? toNumber(inventoryLevel?.available_adjustment);
+    const ev = req.body;
 
-    if (!invItemId) return res.status(200).send('ok');
-    if (resolvedAvailable == null && resolvedAdjustment == null) return res.status(200).send('ok');
+    // Derivar delta de forma robusta
+    const before = Number(
+      ev?.previous_quantity ??
+      ev?.inventory_level?.available_before ??
+      ev?.available_before
+    );
+    const after = Number(
+      ev?.available ??
+      ev?.inventory_level?.available
+    );
+    let delta = Number.isFinite(after) && Number.isFinite(before)
+      ? (after - before)
+      : Number(ev?.available_adjustment ?? 0);
 
-    // 1) obtener SKU desde inventory_item_id
-    const sku = await getInventoryItemSku(invItemId).catch(() => null);
-    if (!sku) return res.status(200).send('ok');
-
-    // 2) buscar item QBD por SKU (prioridades + overrides)
-    const inv = loadInventory();
-    const fieldsPriority = skuFields();
-    const searchItems = Array.isArray(inv.allItems) ? inv.allItems : inv.items || [];
-    const it = resolveSkuToItem(searchItems, sku, fieldsPriority);
-    if (!it) return res.status(200).send('ok');
-
-    // 3) calcular delta con respecto a QBD (snapshot)
-    const qbdQohRaw = toNumber(it.QuantityOnHand);
-    const qbdQoh = qbdQohRaw == null ? 0 : qbdQohRaw;
-    let newAvailable = resolvedAvailable;
-    if (newAvailable == null && resolvedAdjustment != null) newAvailable = qbdQoh + resolvedAdjustment;
-    const delta =
-      resolvedAdjustment != null
-        ? resolvedAdjustment
-        : newAvailable != null
-        ? newAvailable - qbdQoh
-        : 0;
-
-    const itemRef = toItemRef(it);
-    if (!itemRef) {
-      return res.status(200).json({
-        ok: true,
-        sku,
-        qbdQoh,
-        available: newAvailable,
-        availableAdjustment: resolvedAdjustment,
-        delta,
-        queued: false,
-      });
+    // Si no hay delta discernible, no hacemos nada
+    if (!Number.isFinite(delta) || delta === 0) {
+      return res.status(200).send('noop');
     }
 
-    if (!delta) {
-      return res.status(200).json({
-        ok: true,
-        sku,
-        qbdQoh,
-        available: newAvailable,
-        availableAdjustment: resolvedAdjustment,
-        delta,
-        queued: false,
-      });
-    }
-    console.log('[WEBHOOK] payload parsed', { invItemId, sku, qbdQoh, newAvailable, resolvedAdjustment, delta });
-
-    const queuedType = delta < 0 ? 'invoiceAdd' : 'inventoryAdjust';
-
+    // VENTAS (delta < 0): se facturan en /orders/paid → NO inventario aquí
     if (delta < 0) {
-      const quantity = Math.abs(delta);
-      const classRef = envRef('QBD_SHOPIFY_CLASS');
-      const arAccountRef = envRef('QBD_SHOPIFY_AR_ACCOUNT');
-      const termsRef = envRef('QBD_SHOPIFY_TERMS');
-      const templateRef = envRef('QBD_SHOPIFY_TEMPLATE');
-      const salesRepRef = envRef('QBD_SHOPIFY_SALESREP');
-      const shipMethodRef = envRef('QBD_SHOPIFY_SHIPMETHOD');
-
-      const lineDesc =
-        (typeof it?.SalesDesc === 'string' && it.SalesDesc.trim()) ||
-        (typeof it?.FullName === 'string' && it.FullName.trim()) ||
-        (typeof it?.Name === 'string' && it.Name.trim()) ||
-        sku;
-
-      const resolvedOrderNumber =
-        payload?.shopifyOrderNumber ??
-        payload?.order_number ??
-        payload?.name ??
-        payload?.inventory_level?.origin_document_number ??
-        null;
-      console.log(resolvedOrderNumber);
-      const invoicePayload = {
-        customer: onlineSalesCustomerRef(),
-        txnDate: toQBDate(payload?.updated_at || inventoryLevel?.updated_at || new Date()),
-        memo: resolvedOrderNumber ? String(resolvedOrderNumber) : `Shopify auto invoice for ${sku}`,
-        refNumber: buildRefNumber(
-          payload?.order_number ?? payload?.name ?? payload?.inventory_level?.origin_document_number,
-          'INV',
-          payload?.inventory_item_id
-        ),
-        lines: [
-          {
-            ItemRef: itemRef,
-            Desc: lineDesc,
-            Quantity: quantity,
-          },
-        ],
-      };
-
-      const rateFromPayload = parseMoney(
-        payload?.shopifyPrice ??
-          payload?.price ??
-          payload?.unitPrice ??
-          payload?.unit_price ??
-          payload?.inventory_level?.price ??
-          payload?.inventory_level?.cost ??
-          payload?.amount ??
-          payload?.line_price
-      );
-
-      if (rateFromPayload != null) {
-        invoicePayload.lines[0].Rate = rateFromPayload;
-      }
-
-      if (classRef) invoicePayload.ClassRef = classRef;
-      if (arAccountRef) invoicePayload.ARAccountRef = arAccountRef;
-      if (termsRef) invoicePayload.TermsRef = termsRef;
-      if (templateRef) invoicePayload.TemplateRef = templateRef;
-      if (salesRepRef) invoicePayload.SalesRepRef = salesRepRef;
-      if (shipMethodRef) invoicePayload.ShipMethodRef = shipMethodRef;
-
-      await enqueueJob({
-        type: 'invoiceAdd',
-        source: 'shopify-inventory-level',
-        createdAt: new Date().toISOString(),
-        payload: invoicePayload,
-      });
-    } else {
-      await enqueueJob({
-        type: 'inventoryAdjust',
-        lines: [{ ...itemRef, QuantityDifference: delta }],
-        account: process.env.QBD_ADJUST_ACCOUNT || undefined,
-        source: 'shopify-inventory-level',
-        createdAt: new Date().toISOString(),
-      });
+      return res.status(200).send('ignored-sale-delta');
     }
 
-    return res.status(200).json({
-      ok: true,
-      sku,
-      qbdQoh,
-      available: newAvailable,
-      availableAdjustment: resolvedAdjustment,
-      delta,
-      queued: true,
-      queuedType,
+    // REABASTECIMIENTOS / CORRECCIONES POSITIVAS (delta > 0): encola ajuste si quieres reflejarlo
+    // Mapea inventory_item_id → QBD Item (ListID o FullName)
+    const listId = (typeof mapToQbdListID === 'function')
+      ? mapToQbdListID(ev?.inventory_item_id)
+      : null;
+
+    if (!listId) {
+      // Si no puedes mapear, registra y evita enviar un ajuste inválido
+      console.warn('inventory_levels/update: no mapping for inventory_item_id', ev?.inventory_item_id);
+      return res.status(200).send('no-mapping');
+    }
+
+    await enqueueJob({
+      type: 'inventoryAdjust',
+      lines: [
+        {
+          ListID: listId,
+          QuantityDifference: Math.abs(delta),  // delta > 0
+        },
+      ],
+      account: process.env.QBD_ADJUST_ACCOUNT || 'Inventory Adjustment',
+      source: 'shopify-inventory-level',
+      createdAt: new Date().toISOString(),
     });
-  } catch (e) {
-    console.error('inventory_levels/update webhook error:', e);
-    return res.status(500).send('error');
+
+    return res.status(200).send('ok');
+  } catch (err) {
+    console.error('inventory_levels/update handler error:', err);
+    return res.status(200).send('ok');
   }
 });
 
