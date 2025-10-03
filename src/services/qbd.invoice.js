@@ -69,7 +69,7 @@ function lineXml(line = {}) {
   const amount = line.Amount != null ? line.Amount : line.amount;
   const rateStr = rate != null ? formatMoney(rate) : null;
   const amountStr = amount != null ? formatMoney(amount) : null;
-  if (rateStr != null) parts.push(`<Rate>10.00</Rate>`);
+  if (rateStr != null) parts.push(`<Rate>${rateStr}</Rate>`);
   if (amountStr != null && rateStr == null) parts.push(`<Amount>${amountStr}</Amount>`);
 
   if (line.ServiceDate || line.serviceDate) {
