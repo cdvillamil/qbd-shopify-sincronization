@@ -69,7 +69,6 @@ function buildInvoiceXML(payload = {}, qbxmlVer = process.env.QBXML_VER || '16.0
         ${refXml('ARAccountRef', payload.arAccount || payload.ARAccountRef)}
         ${refXml('TemplateRef', payload.template || payload.TemplateRef)}
         ${optionalDate('TxnDate', payload.txnDate || payload.TxnDate)}
-        ${optionalTag('RefNumber', payload.refNumber || payload.RefNumber)}
         ${refXml('TermsRef', payload.terms || payload.TermsRef)}
         ${optionalDate('DueDate', payload.dueDate || payload.DueDate)}
         ${optionalTag('PONumber', payload.poNumber || payload.PONumber)}
