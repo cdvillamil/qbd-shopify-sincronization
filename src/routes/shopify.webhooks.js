@@ -264,17 +264,36 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       SalesTaxCodeRef: { FullName: li?.taxable ? 'TAX' : 'NON' },
     })).filter(l => l.Quantity > 0);
 
-    // 5) Envío (opcional)
-    const shippingTotal = (order?.shipping_lines || [])
-      .reduce((sum, s) => sum + Number(s?.price ?? s?.price_set?.shop_money?.amount ?? 0), 0);
+    
+    const SHIPPING_ITEM_NAME = 'SHIPPING WITH GUARANTEE';
+    const SHIPPING_DESC = 'CHARGE TO BE APPLIED TO ANY SHIP ITEM';
+    const SHIPPING_TAX_CODE = 'TAX'; // usa 'NON' si el envío no es gravable
 
-    const shippingLine = (shippingTotal > 0)
+    // 1) ¿Hubo método de envío?
+    const hasShippingMethod = Array.isArray(order?.shipping_lines) && order.shipping_lines.length > 0;
+
+    // 2) Total de envío (robusto: toma price o discounted_price)
+    let shippingTotal = 0;
+    if (hasShippingMethod) {
+      shippingTotal = order.shipping_lines.reduce((sum, s) => {
+        const val =
+          s?.discounted_price ??
+          s?.price ??
+          s?.discounted_price_set?.shop_money?.amount ??
+          s?.price_set?.shop_money?.amount ??
+          0;
+        return sum + Number(val);
+      }, 0);
+    }
+
+    // 3) SIEMPRE agrega la línea si hubo método de envío, aun si es FREE (0.00)
+    const shippingLine = hasShippingMethod
       ? [{
-          ItemRef: { FullName: process.env.QBD_SHIPPING_ITEM_NAME || 'SHIPPING WITH GUARANTEE' },
-          Desc: (order?.shipping_lines?.[0]?.title) || 'Shipping',
+          ItemRef: { FullName: SHIPPING_ITEM_NAME },
+          Desc: SHIPPING_DESC,
           Quantity: 1,
-          Rate: Number(shippingTotal),
-          SalesTaxCodeRef: { FullName: process.env.QBD_SHIPPING_TAXABLE === 'true' ? 'TAX' : 'NON' },
+          Rate: Number.isFinite(shippingTotal) ? Number(shippingTotal) : 0,
+          SalesTaxCodeRef: { FullName: SHIPPING_TAX_CODE },
         }]
       : [];
 
