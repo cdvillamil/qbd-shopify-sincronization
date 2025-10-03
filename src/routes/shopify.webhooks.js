@@ -386,7 +386,7 @@ router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
         payload?.name ??
         payload?.inventory_level?.origin_document_number ??
         null;
-
+      console.log(resolvedOrderNumber);
       const invoicePayload = {
         customer: onlineSalesCustomerRef(),
         txnDate: toQBDate(payload?.updated_at || inventoryLevel?.updated_at || new Date()),
