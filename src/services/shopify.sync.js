@@ -31,6 +31,9 @@ const SNAP_BAK_PATH = `${SNAP_PATH}.bak`;
 const SNAP_TMP_PATH = `${SNAP_PATH}.tmp`;
 const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
 const LOCK_PATH = path.join(LOG_DIR, 'shopify-sync.lock');
+const INITIAL_SWEEP_STATUS_PATH = path.join(LOG_DIR, 'initial-sweep-status.json');
+const INITIAL_SWEEP_QBD_ONLY_PATH = path.join(LOG_DIR, 'initial-sweep-qbd-only.json');
+const INITIAL_SWEEP_SHOPIFY_ONLY_PATH = path.join(LOG_DIR, 'initial-sweep-shopify-only.json');
 const LOCK_ERROR_CODE = 'SHOPIFY_SYNC_LOCKED';
 
 // --- Debug helpers ---
@@ -230,6 +233,34 @@ function writeSnapshotFile(value) {
     throw err;
   }
 }
+
+function writeJsonFile(pathname, value) {
+  ensureLogDir();
+  const payload = JSON.stringify(value ?? null, null, 2);
+  fs.writeFileSync(pathname, payload, 'utf8');
+}
+
+function readJsonFile(pathname) {
+  try {
+    if (!fs.existsSync(pathname)) return null;
+    const raw = fs.readFileSync(pathname, 'utf8');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    if (DEBUG) {
+      console.warn('[sync] json read error:', { path: pathname, error: err?.message || err });
+    }
+    return null;
+  }
+}
+
+function boolFromEnv(value) {
+  return /^(1|true|yes)$/i.test(String(value || '').trim());
+}
+
+function isInitialSweepEnabled() {
+  return boolFromEnv(process.env.INITIAL_SWEEP_ENABLED || process.env.SHOPIFY_INITIAL_SWEEP || '');
+}
 function saveLastPush(plan) {
   const payload = { pushedAt: new Date().toISOString(), ...plan };
   ensureLogDir();
@@ -318,16 +349,24 @@ function pruneSnapshot(successIndices, successListIds) {
 }
 
 // --- Public API ---
-async function buildPlan(limit) {
+async function buildPlan(limit, options = {}) {
+  const { useAllItems = false, includeNoSku = false, includeItemDetails = false } = options || {};
   const snapshot = loadSnapshot();
-  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+  const selectedItems = useAllItems && Array.isArray(snapshot.allItems)
+    ? snapshot.allItems
+    : Array.isArray(snapshot.items) ? snapshot.items : [];
+  const items = Array.isArray(selectedItems) ? selectedItems : [];
   const fields = getSkuFieldsPriority();
-  dbg('dryRun start', { limit: Number(limit || 0), snapshotCount: items.length });
+  dbg('dryRun start', {
+    limit: Number(limit || 0),
+    snapshotCount: items.length,
+    useAllItems,
+  });
 
   const out = [];
   if (!items || items.length === 0) {
     dbg('dryRun: snapshot empty → no ops');
-    return { fields, ops: out };
+    return { fields, ops: out, sourceItems: items, snapshotSource: useAllItems ? 'allItems' : 'items' };
   }
 
   let logged = 0;
@@ -338,6 +377,18 @@ async function buildPlan(limit) {
       if (DEBUG && logged < LOG_N) {
         dbg('item without SKU by fields', { fields, itemKeys: Object.keys(it || {}) });
         logged++;
+      }
+      if (includeNoSku) {
+        const op = {
+          sku: null,
+          target: Number(it?.QuantityOnHand || 0),
+          inventory_item_id: null,
+          action: 'MISSING_SKU',
+          snapshotIndex: idx,
+          listId: it?.ListID || null,
+        };
+        if (includeItemDetails) op.item = it;
+        out.push(op);
       }
       continue;
     }
@@ -374,13 +425,19 @@ async function buildPlan(limit) {
       action: variant ? 'SET_AVAILABLE' : 'NO_MATCH',
       snapshotIndex: idx,
       listId: it?.ListID || null,
+      ...(includeItemDetails ? { item: it } : {}),
     });
 
     if (limit && out.length >= Number(limit)) break;
   }
 
   dbg('dryRun result:', { ops: out.length, setAvailable: out.filter(x => x.action === 'SET_AVAILABLE').length, noMatch: out.filter(x => x.action === 'NO_MATCH').length });
-  return { fields, ops: out };
+  return {
+    fields,
+    ops: out,
+    sourceItems: items,
+    snapshotSource: useAllItems ? 'allItems' : 'items',
+  };
 }
 
 async function dryRun(limit) {
@@ -454,6 +511,261 @@ async function apply(limit) {
   }
 }
 
+function parseGid(gid, type) {
+  const match = String(gid || '').match(new RegExp(`${type}/(\d+)`));
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchAllShopifyVariants() {
+  const variants = [];
+  const configuredPageSize = Number(process.env.SHOPIFY_INITIAL_SWEEP_PAGE_SIZE);
+  const pageSize = Number.isFinite(configuredPageSize) && configuredPageSize > 0
+    ? Math.min(250, Math.max(1, Math.floor(configuredPageSize)))
+    : 250;
+  let cursor = null;
+  let loops = 0;
+
+  while (true) {
+    loops += 1;
+    if (loops > 10_000) {
+      throw new Error('Shopify variant pagination exceeded safety limit (10000 iterations).');
+    }
+
+    const afterClause = cursor ? `, after: ${JSON.stringify(cursor)}` : '';
+    const query = `{
+      productVariants(first: ${pageSize}${afterClause}) {
+        edges {
+          cursor
+          node {
+            id
+            sku
+            title
+            inventoryItem { id sku }
+            product { id title handle }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }`;
+
+    const data = await shopifyGraphQL(query);
+    const edges = data?.productVariants?.edges || [];
+    for (const edge of edges) {
+      const node = edge?.node;
+      if (!node) continue;
+      const variantId = parseGid(node.id, 'ProductVariant');
+      const inventoryItemId = parseGid(node.inventoryItem?.id, 'InventoryItem');
+      const productId = parseGid(node.product?.id, 'Product');
+      const skuValue = (node.sku || node.inventoryItem?.sku || '').trim();
+      variants.push({
+        sku: skuValue,
+        variantId,
+        inventoryItemId,
+        productId,
+        productTitle: node.product?.title || null,
+        productHandle: node.product?.handle || null,
+        variantTitle: node.title || null,
+        rawSku: node.sku || null,
+      });
+    }
+
+    const pageInfo = data?.productVariants?.pageInfo;
+    if (!pageInfo?.hasNextPage) break;
+    cursor = pageInfo.endCursor || (edges.length ? edges[edges.length - 1]?.cursor : null);
+    if (!cursor) break;
+  }
+
+  return variants;
+}
+
+function buildQbdUnmatched(plan) {
+  const items = Array.isArray(plan?.sourceItems) ? plan.sourceItems : [];
+  const unmatched = [];
+  const skuSet = new Set();
+
+  for (const op of Array.isArray(plan?.ops) ? plan.ops : []) {
+    const normalizedSku = (op?.sku || '').trim();
+    if (normalizedSku) skuSet.add(normalizedSku);
+
+    if (op?.action === 'NO_MATCH' || op?.action === 'MISSING_SKU') {
+      const item = Number.isInteger(op.snapshotIndex) ? items[op.snapshotIndex] : null;
+      unmatched.push({
+        sku: normalizedSku || null,
+        listId: op?.listId || item?.ListID || null,
+        name: item?.FullName || item?.Name || null,
+        quantityOnHand: Number(item?.QuantityOnHand ?? op?.target ?? 0) || 0,
+        action: op?.action || 'NO_MATCH',
+      });
+    }
+  }
+
+  return { unmatched, skuSet };
+}
+
+function buildShopifyOnly(variants, qbdSkuSet) {
+  if (!Array.isArray(variants) || variants.length === 0) {
+    return [];
+  }
+
+  const out = [];
+  for (const variant of variants) {
+    const normalizedSku = (variant?.sku || '').trim();
+    if (!normalizedSku) continue;
+    if (qbdSkuSet.has(normalizedSku)) continue;
+
+    out.push({
+      sku: normalizedSku,
+      variantId: variant?.variantId || null,
+      inventoryItemId: variant?.inventoryItemId || null,
+      productId: variant?.productId || null,
+      productTitle: variant?.productTitle || null,
+      productHandle: variant?.productHandle || null,
+      variantTitle: variant?.variantTitle || null,
+    });
+  }
+
+  return out;
+}
+
+function summarizeResults(results) {
+  const success = results.filter(r => r.ok).length;
+  const failed = results.filter(r => !r.ok).length;
+  const errors = results
+    .filter(r => !r.ok)
+    .map(r => ({
+      sku: r?.sku || null,
+      inventory_item_id: r?.inventory_item_id || null,
+      target: r?.target ?? null,
+      error: r?.error || null,
+    }));
+
+  return { success, failed, errors };
+}
+
+function readInitialSweepStatus() {
+  return readJsonFile(INITIAL_SWEEP_STATUS_PATH);
+}
+
+function readInitialSweepUnmatchedQbd() {
+  return readJsonFile(INITIAL_SWEEP_QBD_ONLY_PATH);
+}
+
+function readInitialSweepUnmatchedShopify() {
+  return readJsonFile(INITIAL_SWEEP_SHOPIFY_ONLY_PATH);
+}
+
+async function runInitialSweep() {
+  const startedAt = new Date().toISOString();
+  writeJsonFile(INITIAL_SWEEP_STATUS_PATH, { status: 'running', startedAt });
+
+  let releaseLock;
+  try {
+    releaseLock = acquireLock();
+  } catch (err) {
+    const payload = {
+      status: 'failed',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      error: String(err?.message || err),
+      code: err?.code || null,
+    };
+    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, payload);
+    throw err;
+  }
+
+  try {
+    const plan = await buildPlan(undefined, {
+      useAllItems: true,
+      includeNoSku: true,
+      includeItemDetails: true,
+    });
+    const { unmatched: qbdUnmatched, skuSet } = buildQbdUnmatched(plan);
+    const shopifyVariants = await fetchAllShopifyVariants();
+    const shopifyOnly = buildShopifyOnly(shopifyVariants, skuSet);
+
+    const generatedAt = new Date().toISOString();
+    writeJsonFile(INITIAL_SWEEP_QBD_ONLY_PATH, {
+      generatedAt,
+      count: qbdUnmatched.length,
+      items: qbdUnmatched,
+    });
+    writeJsonFile(INITIAL_SWEEP_SHOPIFY_ONLY_PATH, {
+      generatedAt,
+      count: shopifyOnly.length,
+      items: shopifyOnly,
+    });
+
+    const operations = plan.ops.filter(op => op?.action === 'SET_AVAILABLE' && op?.inventory_item_id);
+    const results = [];
+    for (const op of operations) {
+      try {
+        await setInventoryLevel(op.inventory_item_id, op.target);
+        results.push({ ...op, ok: true });
+      } catch (err) {
+        console.error('[sync] initial sweep setInventoryLevel error', {
+          sku: op?.sku,
+          inventory_item_id: op?.inventory_item_id,
+          target: op?.target,
+          error: err?.message || err,
+        });
+        results.push({ ...op, ok: false, error: String(err?.message || err) });
+      }
+    }
+
+    const summary = summarizeResults(results);
+    const finishedAt = new Date().toISOString();
+    const statusPayload = {
+      status: 'completed',
+      startedAt,
+      finishedAt,
+      operationsPlanned: operations.length,
+      ...summary,
+      unmatchedQbd: qbdUnmatched.length,
+      unmatchedShopify: shopifyOnly.length,
+      snapshotSource: plan.snapshotSource,
+    };
+    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, statusPayload);
+    return statusPayload;
+  } catch (err) {
+    const finishedAt = new Date().toISOString();
+    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, {
+      status: 'failed',
+      startedAt,
+      finishedAt,
+      error: String(err?.message || err),
+      code: err?.code || null,
+    });
+    throw err;
+  } finally {
+    if (typeof releaseLock === 'function') releaseLock();
+  }
+}
+
+async function runInitialSweepIfNeeded() {
+  if (!isInitialSweepEnabled()) {
+    return null;
+  }
+
+  const status = readInitialSweepStatus();
+  if (status?.status === 'completed' || status?.status === 'running') {
+    return status;
+  }
+
+  try {
+    return await runInitialSweep();
+  } catch (err) {
+    if (DEBUG) {
+      console.warn('[sync] initial sweep failed:', err?.message || err);
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   dryRun,
   apply,
@@ -461,4 +773,10 @@ module.exports = {
   findVariantBySkuGQL,
   shopifyGraphQL,
   LOCK_ERROR_CODE,
+  runInitialSweep,
+  runInitialSweepIfNeeded,
+  readInitialSweepStatus,
+  readInitialSweepUnmatchedQbd,
+  readInitialSweepUnmatchedShopify,
+  isInitialSweepEnabled,
 };

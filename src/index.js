@@ -628,6 +628,19 @@ app.post(BASE_PATH, (req,res)=>{
               end: end.toISOString(),
             });
 
+          try {
+            const { runInitialSweepIfNeeded, isInitialSweepEnabled } = require('./services/shopify.sync');
+            if (isInitialSweepEnabled()) {
+              setImmediate(() =>
+                runInitialSweepIfNeeded().catch((err) => {
+                  console.error('Initial sweep auto-run error:', err);
+                })
+              );
+            }
+          } catch (err) {
+            console.error('Initial sweep trigger setup failed:', err);
+          }
+
           // --- Auto push a Shopify (después de persistir el snapshot) ---
           try {
             const m = resp.match(/<ItemInventoryQueryRs[^>]*statusCode="(\d+)"/i);
