@@ -5,9 +5,10 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+# Evita cancelar el job de prod cuando esté esperando aprobación y entra un nuevo push
 concurrency:
-  group: webapp-deploy
-  cancel-in-progress: true
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   package_source:
@@ -16,13 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🔧 Evita "fatal: detected dubious ownership in repository"
       - name: Git safe.directory (self-hosted Windows)
         shell: powershell
         run: |
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
 
-      # Crea un ZIP solo con archivos versionados (sin node_modules)
       - name: Create source ZIP (git archive)
         shell: powershell
         working-directory: ${{ github.workspace }}
@@ -30,8 +29,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if (Test-Path app.zip) { Remove-Item app.zip -Force }
           git archive -o app.zip HEAD
-
-          # Verificaciones rápidas
           if (-not (Test-Path "package.json")) { Write-Error "No existe package.json en el repo." }
           if (-not (Test-Path "package-lock.json")) { Write-Warning "No hay package-lock.json committeado. Azure hará 'npm install' en vez de 'npm ci'." }
 
@@ -44,6 +41,9 @@ jobs:
   deploy_staging:
     runs-on: [self-hosted, Windows, X64]
     needs: package_source
+    environment:
+      name: staging            # Environment STAGING (sin aprobación)
+      url: https://stagging-qbd-shopify-sincronization-dtdqadffh7fuc8ej.eastus-01.azurewebsites.net  # opcional
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -59,6 +59,10 @@ jobs:
   deploy_production:
     runs-on: [self-hosted, Windows, X64]
     needs: deploy_staging
+    # No condiciones extras: el Environment "production" pedirá aprobación manual
+    environment:
+      name: production         # Configura Required reviewers en Settings → Environments
+      url: https://qbd-shopify-sincronization-hcf0avcfe9erhtgx.eastus-01.azurewebsites.net  # opcional
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
