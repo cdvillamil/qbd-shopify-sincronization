@@ -2,53 +2,54 @@ name: Build & Deploy — Staging + Prod (Source → Oryx build)
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches: [ "main" ]         # Auto-deploy a STAGING
+  workflow_dispatch: {}           # Puedes relanzar manualmente si quieres
 
-# Evita cancelar el job de prod cuando esté esperando aprobación y entra un nuevo push
+# No canceles una promoción que espera aprobación
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   package_source:
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Git safe.directory (self-hosted Windows)
-        shell: powershell
-        run: |
-          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
-
+      # Crea un ZIP solo con archivos versionados (sin node_modules)
       - name: Create source ZIP (git archive)
-        shell: powershell
-        working-directory: ${{ github.workspace }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          if (Test-Path app.zip) { Remove-Item app.zip -Force }
+          set -e
+          rm -f app.zip
           git archive -o app.zip HEAD
-          if (-not (Test-Path "package.json")) { Write-Error "No existe package.json en el repo." }
-          if (-not (Test-Path "package-lock.json")) { Write-Warning "No hay package-lock.json committeado. Azure hará 'npm install' en vez de 'npm ci'." }
+          if [ ! -f package.json ]; then
+            echo "No existe package.json en el repo." >&2
+            exit 1
+          fi
+          if [ ! -f package-lock.json ]; then
+            echo "::warning::No hay package-lock.json committeado. Azure hará 'npm install' en vez de 'npm ci'."
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: source-zip
           path: app.zip
+          retention-days: 30
 
   deploy_staging:
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: ubuntu-latest
     needs: package_source
     environment:
-      name: staging            # Environment STAGING (sin aprobación)
-      url: https://stagging-qbd-shopify-sincronization-dtdqadffh7fuc8ej.eastus-01.azurewebsites.net  # opcional
+      name: staging
+      url: https://stagging-qbd-shopify-sincronization-dtdqadffh7fuc8ej.eastus-01.azurewebsites.net
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: source-zip
+
       - name: Deploy to STAGING (source, remote build)
         uses: azure/webapps-deploy@v3
         with:
@@ -57,17 +58,18 @@ jobs:
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_STAGING }}
 
   deploy_production:
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: ubuntu-latest
     needs: deploy_staging
-    # No condiciones extras: el Environment "production" pedirá aprobación manual
+    # El Environment "production" detiene aquí hasta que aprueben (Required reviewers)
     environment:
-      name: production         # Configura Required reviewers en Settings → Environments
-      url: https://qbd-shopify-sincronization-hcf0avcfe9erhtgx.eastus-01.azurewebsites.net  # opcional
+      name: production
+      url: https://qbd-shopify-sincronization-hcf0avcfe9erhtgx.eastus-01.azurewebsites.net
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: source-zip
+
       - name: Deploy to PRODUCTION (source, remote build)
         uses: azure/webapps-deploy@v3
         with:
