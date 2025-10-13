@@ -42,19 +42,23 @@ const LOG_N = Number(process.env.SHOPIFY_SYNC_DEBUG_LOG_N || 10);
 function dbg(...args) { if (DEBUG) console.log('[sync]', ...args); }
 
 // === Shopify GraphQL helpers ===
-async function shopifyGraphQL(query) {
+async function shopifyGraphQL(query, variables) {
   const url = `https://${process.env.SHOPIFY_STORE}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`;
 
   let attempt = 0;
   while (true) {
     attempt += 1;
+    const payload = { query };
+    if (variables && typeof variables === 'object' && Object.keys(variables).length > 0) {
+      payload.variables = variables;
+    }
     const r = await _fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': process.env.SHOPIFY_TOKEN,
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify(payload),
     });
 
     const json = await r.json().catch(() => ({}));
@@ -89,9 +93,19 @@ async function findVariantBySkuGQL(sku) {
   const s = String(sku || '').trim();
   if (!s) return null;
 
-  const data = await shopifyGraphQL(
-    `{ productVariants(first: 5, query:"sku:${s}") { edges { node { id sku inventoryItem { id } } } } }`
-  );
+  const gql = `query FindVariantBySku($query: String!) {
+    productVariants(first: 5, query: $query) {
+      edges {
+        node {
+          id
+          sku
+          inventoryItem { id }
+        }
+      }
+    }
+  }`;
+
+  const data = await shopifyGraphQL(gql, { query: `sku:${JSON.stringify(s)}` });
 
   const node = data?.productVariants?.edges?.find(e => e?.node?.sku?.trim() === s)?.node;
   if (!node) return null;
