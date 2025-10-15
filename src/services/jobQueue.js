@@ -20,6 +20,94 @@ function ensureDir() {
   }
 }
 
+function pruneLogFiles(pattern, { keep = Infinity, maxAgeMs = 0 } = {}) {
+  if (!pattern) return 0;
+
+  const matcher =
+    pattern instanceof RegExp
+      ? (name) => pattern.test(name)
+      : typeof pattern === 'function'
+      ? pattern
+      : typeof pattern === 'string'
+      ? (name) => name.includes(pattern)
+      : null;
+
+  if (!matcher) {
+    throw new TypeError('pruneLogFiles requires a RegExp, string or predicate function');
+  }
+
+  ensureDir();
+
+  const now = Date.now();
+  const entries = [];
+
+  for (const name of fs.readdirSync(LOG_DIR)) {
+    if (!matcher(name)) continue;
+
+    const fullPath = path.join(LOG_DIR, name);
+    let ts = 0;
+
+    const tsMatch = name.match(/(\d{5,})/g);
+    if (tsMatch && tsMatch.length) {
+      const parsedTs = Number(tsMatch[tsMatch.length - 1]);
+      if (Number.isFinite(parsedTs)) {
+        ts = parsedTs;
+      }
+    }
+
+    if (!ts) {
+      try {
+        ts = fs.statSync(fullPath).mtimeMs || 0;
+      } catch (err) {
+        if (process.env.DEBUG_LOG_RETENTION) {
+          console.warn('[jobQueue] pruneLogFiles stat error:', err?.message || err);
+        }
+      }
+    }
+
+    entries.push({ name, fullPath, ts });
+  }
+
+  if (!entries.length) return 0;
+
+  entries.sort((a, b) => b.ts - a.ts);
+
+  const limit = Number.isFinite(keep) && keep >= 0 ? Math.floor(keep) : Infinity;
+  const maxAge = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : 0;
+
+  const toRemove = [];
+  for (let idx = 0; idx < entries.length; idx += 1) {
+    const entry = entries[idx];
+    const beyondLimit = idx >= limit;
+    const tooOld = maxAge > 0 && entry.ts > 0 && now - entry.ts > maxAge;
+
+    if (beyondLimit || tooOld) {
+      toRemove.push(entry);
+    }
+  }
+
+  let removed = 0;
+  for (const entry of toRemove) {
+    try {
+      fs.unlinkSync(entry.fullPath);
+      removed += 1;
+    } catch (err) {
+      if (err && err.code !== 'ENOENT' && process.env.DEBUG_LOG_RETENTION) {
+        console.warn('[jobQueue] pruneLogFiles unlink error:', {
+          file: entry.fullPath,
+          error: err?.message || err,
+        });
+      }
+    }
+  }
+
+  if (removed > 0 && process.env.DEBUG_LOG_RETENTION) {
+    console.log('[jobQueue] pruneLogFiles removed %d file(s) matching pattern', removed);
+  }
+
+  return removed;
+}
+
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -161,4 +249,5 @@ module.exports = {
   setCurrentJob,
   getCurrentJob,
   clearCurrentJob,
+  pruneLogFiles,
 };

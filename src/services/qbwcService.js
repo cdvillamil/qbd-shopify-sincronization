@@ -4,7 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
+const { LOG_DIR, ensureDir: ensureLogDir, pruneLogFiles } = require('./jobQueue');
 
 /**
  * OBJETIVO
@@ -29,6 +29,26 @@ const APP_PASS = process.env.WC_PASSWORD || '';
 function save(name, txt) { ensureLogDir(); fs.writeFileSync(path.join(LOG_DIR, name), txt ?? '', 'utf8'); }
 function read(name) { try { return fs.readFileSync(path.join(LOG_DIR, name), 'utf8'); } catch { return null; } }
 function sha256(s) { return crypto.createHash('sha256').update(s || '').digest('hex'); }
+
+const LAST_RESPONSE_KEEP = Math.max(1, Number(process.env.LAST_RESPONSE_KEEP || 1440));
+const LAST_RESPONSE_MAX_AGE_HOURS = Number(process.env.LAST_RESPONSE_MAX_AGE_HOURS || 48);
+const LAST_RESPONSE_MAX_AGE_MS = LAST_RESPONSE_MAX_AGE_HOURS > 0
+  ? LAST_RESPONSE_MAX_AGE_HOURS * 60 * 60 * 1000
+  : 0;
+const LAST_RESPONSE_PATTERN = /^last-response-\d+\.xml$/;
+
+function pruneLastResponses() {
+  try {
+    pruneLogFiles(LAST_RESPONSE_PATTERN, {
+      keep: LAST_RESPONSE_KEEP,
+      maxAgeMs: LAST_RESPONSE_MAX_AGE_MS,
+    });
+  } catch (err) {
+    if (process.env.DEBUG_LOG_RETENTION) {
+      console.warn('[qbwcService] pruneLastResponses error:', err?.message || err);
+    }
+  }
+}
 
 /* =========================
    Construcción de QBXML
@@ -205,6 +225,8 @@ function qbwcServiceFactory() {
       }
       save(`last-response-${Date.now()}.xml`, xml);
       save('last-response.xml', xml);
+      // Ejecuta la poda en cada snapshot recibido desde el WC
+      pruneLastResponses();
 
       const items = parseInventory(xml);
       save('last-inventory.json', JSON.stringify({ count: items.length, items }, null, 2));
