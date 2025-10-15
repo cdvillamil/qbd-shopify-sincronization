@@ -22,6 +22,7 @@ const {
   clearCurrentJob,
   LOG_DIR,
   ensureDir: ensureLogDir,
+  pruneLogFiles,
 } = require('./services/jobQueue');
 require('dotenv').config();
 
@@ -30,6 +31,26 @@ const PORT      = process.env.PORT || 8080;             // En Azure Linux escuch
 const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LAST_ERROR_FILE = 'last-error.txt';
 const TNS       = 'http://developer.intuit.com/';
+
+const LAST_RESPONSE_KEEP = Math.max(1, Number(process.env.LAST_RESPONSE_KEEP || 1440));
+const LAST_RESPONSE_MAX_AGE_HOURS = Number(process.env.LAST_RESPONSE_MAX_AGE_HOURS || 48);
+const LAST_RESPONSE_MAX_AGE_MS = LAST_RESPONSE_MAX_AGE_HOURS > 0
+  ? LAST_RESPONSE_MAX_AGE_HOURS * 60 * 60 * 1000
+  : 0;
+const LAST_RESPONSE_PATTERN = /^last-response-\d+\.xml$/;
+
+function pruneLastResponses() {
+  try {
+    pruneLogFiles(LAST_RESPONSE_PATTERN, {
+      keep: LAST_RESPONSE_KEEP,
+      maxAgeMs: LAST_RESPONSE_MAX_AGE_MS,
+    });
+  } catch (err) {
+    if (process.env.DEBUG_LOG_RETENTION) {
+      console.warn('[qbwc] pruneLastResponses error:', err?.message || err);
+    }
+  }
+}
 
 const SKU_FIELD_PRIORITY = (process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name')
   .split(',')
@@ -513,6 +534,8 @@ app.post(BASE_PATH, (req,res)=>{
         const now  = Date.now();
         save(`last-response-${now}.xml`, resp);
         save('last-response.xml', resp);
+        // Limpia snapshots antiguos en cada corrida del Web Connector
+        pruneLastResponses();
         //console.log('[qbwc] receiveResponseXML QBXML payload:', resp);
 
         const hresult = (extract(raw, 'hresult') || '').trim();

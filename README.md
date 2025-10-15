@@ -30,6 +30,9 @@ Las variables mínimas para un entorno productivo son:
 | `SHOPIFY_LOCATION_ID` | Sí | ID numérico de la ubicación de inventario a ajustar.【F:src/services/shopify.client.js†L1-L142】 |
 | `SHOPIFY_WEBHOOK_SECRET` | Recomendado | Secreto para validar webhooks de Shopify; si se omite, en desarrollo no se bloquean firmas inválidas.【F:src/routes/shopify.webhooks.js†L29-L47】 |
 | `LOG_DIR` | Recomendado | Directorio persistente para la cola y snapshots. En App Service usa `/home/logs/qbd` para conservar archivos entre reinicios.【F:src/services/jobQueue.js†L6-L144】 |
+| `LAST_RESPONSE_KEEP` | Opcional | Máximo de snapshots `last-response-*.xml` a conservar. Por defecto `1440` (equivale a 24 horas si el Web Connector corre cada minuto).【F:src/index.js†L33-L54】【F:src/services/qbwcService.js†L28-L50】 |
+| `LAST_RESPONSE_MAX_AGE_HOURS` | Opcional | Tiempo máximo (en horas) para conservar snapshots `last-response-*.xml`. Por defecto `48`; usa `0` para desactivar la caducidad por edad.【F:src/index.js†L33-L54】【F:src/services/qbwcService.js†L28-L50】 |
+| `DEBUG_LOG_RETENTION` | Opcional | Si tiene algún valor, imprime en consola cuántos archivos se eliminaron en cada poda de logs.【F:src/services/jobQueue.js†L19-L117】 |
 | `BASE_PATH` | Opcional | Ruta base del endpoint SOAP (por defecto `/qbwc`).【F:src/index.js†L29-L205】 |
 | `PORT` | Opcional | Puerto de escucha. App Service inyecta `PORT` y la app usa `8080` como respaldo.【F:src/index.js†L29-L38】 |
 | `QBXML_VER` | Opcional | Versión de QBXML a usar (por defecto `16.0` en la mayoría de builders).【F:src/index.js†L152-L179】 |
@@ -44,6 +47,13 @@ Las variables mínimas para un entorno productivo son:
 | `QBD_SHOPIFY_*` | Opcional | Configura ítems y cuentas especiales (cliente Shopify, artículos de envío/descuento, impuestos) usados al generar ventas en QBD.【F:src/routes/shopify.webhooks.js†L59-L121】【F:src/routes/shopify.webhooks.js†L296-L324】 |
 
 > Consejo: en App Service los archivos bajo `/home` persisten entre despliegues. Define `LOG_DIR=/home/qbd-sync` para conservar `jobs.json`, snapshots y archivos de depuración.
+
+### Retención automática de snapshots en `/tmp`
+
+- Cada vez que el Web Connector responde con inventario se guardan dos archivos: `last-response.xml` (el más reciente) y un snapshot con nombre `last-response-<timestamp>.xml`.
+- Inmediatamente después se ejecuta una poda (`pruneLastResponses`) que elimina los snapshots que excedan los límites configurados en `LAST_RESPONSE_KEEP` y `LAST_RESPONSE_MAX_AGE_HOURS`.
+- Con los valores por defecto se conservan **los últimos 1 440 archivos** (aprox. 24 h si el WC corre cada minuto) y se purga cualquier snapshot mayor a **48 h**. Si tu intervalo es mayor/menor puedes ajustar ambos parámetros.
+- Si defines `DEBUG_LOG_RETENTION` verás en los logs cuándo y cuántos archivos fueron removidos por la poda.
 
 ## Configuración del Web Connector (WC)
 1. En QuickBooks Web Connector agrega una nueva aplicación usando un archivo `.qwc`. Puedes generar uno manualmente con el siguiente formato (ajusta valores entre `<>`):
