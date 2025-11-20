@@ -389,12 +389,8 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       customer: customerRef,
       txnDate,
       memo: orderNumber || '', // evita "undefined"
-      billAddress: mapAddress
-        ? mapAddress(order?.billing_address, { orderNumber, addressType: 'BillAddress' })
-        : undefined,
-      shipAddress: mapAddress
-        ? mapAddress(order?.shipping_address, { orderNumber, addressType: 'ShipAddress' })
-        : undefined,
+      billAddress: null, // direcciones no se requieren para las facturas
+      shipAddress: null, // evita problemas con caracteres no válidos en XML
       itemSalesTaxRef,
       lines,
       ...discountPayload,
