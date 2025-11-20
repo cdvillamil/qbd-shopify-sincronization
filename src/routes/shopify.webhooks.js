@@ -68,23 +68,81 @@ function envRef(base, fallbackFullName) {
   return null;
 }
 
-function mapAddress(addr) {
+const invalidXmlCharRegex = /[^\u0009\u000A\u000D\u0020-\uD7FF\uE000-\uFFFD]/g;
+
+function sanitizeXmlField(value, { orderNumber, field, addressType }) {
+  if (value == null) return null;
+  const str = String(value);
+  const sanitized = str.replace(invalidXmlCharRegex, '');
+  if (sanitized !== str) {
+    const removedChars = str.match(invalidXmlCharRegex) || [];
+    console.warn(
+      `[shopify.webhooks] removed invalid XML characters from ${addressType || 'address'} ${
+        field || ''
+      } (order ${orderNumber || 'unknown'}):`,
+      removedChars.map((c) => `0x${c.codePointAt(0).toString(16)}`),
+      'original:',
+      str
+    );
+  }
+  const trimmed = sanitized.trim();
+  return trimmed || null;
+}
+
+function mapAddress(addr, { orderNumber, addressType } = {}) {
   if (!addr || typeof addr !== 'object') return null;
   const lines = [];
-  const name = [addr.first_name, addr.last_name].filter(Boolean).join(' ').trim();
+  const name = sanitizeXmlField([addr.first_name, addr.last_name].filter(Boolean).join(' '), {
+    orderNumber,
+    field: 'Name',
+    addressType,
+  });
   if (name) lines.push(name);
-  if (addr.company) lines.push(addr.company);
-  if (addr.address1) lines.push(addr.address1);
-  if (addr.address2) lines.push(addr.address2);
-  if (addr.phone) lines.push(addr.phone);
+
+  const company = sanitizeXmlField(addr.company, { orderNumber, field: 'Company', addressType });
+  if (company) lines.push(company);
+
+  const address1 = sanitizeXmlField(addr.address1, { orderNumber, field: 'Address1', addressType });
+  if (address1) lines.push(address1);
+
+  const address2 = sanitizeXmlField(addr.address2, { orderNumber, field: 'Address2', addressType });
+  if (address2) lines.push(address2);
+
+  const phone = sanitizeXmlField(addr.phone, { orderNumber, field: 'Phone', addressType });
+  if (phone) lines.push(phone);
+
   const result = {};
   lines.slice(0, 5).forEach((line, idx) => {
-    result[`Addr${idx + 1}`] = line;
+    const sanitizedLine = sanitizeXmlField(line, {
+      orderNumber,
+      field: `Addr${idx + 1}`,
+      addressType,
+    });
+    if (sanitizedLine) {
+      result[`Addr${idx + 1}`] = sanitizedLine;
+    }
   });
-  if (addr.city) result.City = addr.city;
-  if (addr.province_code || addr.province) result.State = addr.province_code || addr.province;
-  if (addr.zip) result.PostalCode = addr.zip;
-  if (addr.country_code || addr.country) result.Country = addr.country_code || addr.country;
+
+  const city = sanitizeXmlField(addr.city, { orderNumber, field: 'City', addressType });
+  if (city) result.City = city;
+
+  const state = sanitizeXmlField(addr.province_code || addr.province, {
+    orderNumber,
+    field: 'State',
+    addressType,
+  });
+  if (state) result.State = state;
+
+  const postalCode = sanitizeXmlField(addr.zip, { orderNumber, field: 'PostalCode', addressType });
+  if (postalCode) result.PostalCode = postalCode;
+
+  const country = sanitizeXmlField(addr.country_code || addr.country, {
+    orderNumber,
+    field: 'Country',
+    addressType,
+  });
+  if (country) result.Country = country;
+
   return Object.keys(result).length ? result : null;
 }
 
@@ -331,8 +389,9 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       customer: customerRef,
       txnDate,
       memo: orderNumber || '', // evita "undefined"
-      billAddress: mapAddress ? mapAddress(order?.billing_address) : undefined,
-      shipAddress: mapAddress ? mapAddress(order?.shipping_address) : undefined,
+      // Las direcciones dejaron de enviarse para evitar XML inválido en QBD
+      billAddress: null,
+      shipAddress: null,
       itemSalesTaxRef,
       lines,
       ...discountPayload,
