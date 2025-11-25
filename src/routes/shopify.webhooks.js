@@ -60,6 +60,19 @@ function toItemRef(item) {
   return null;
 }
 
+function pickItemDesc(item, fallbackLine = {}) {
+  return (
+    item?.SalesDesc ||
+    item?.PurchaseDesc ||
+    item?.Name ||
+    item?.FullName ||
+    fallbackLine?.name ||
+    fallbackLine?.title ||
+    fallbackLine?.sku ||
+    ''
+  );
+}
+
 function envRef(base, fallbackFullName) {
   const listId = process.env[`${base}_LISTID`];
   const fullName = process.env[`${base}_FULLNAME`] || process.env[base] || fallbackFullName;
@@ -231,7 +244,7 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
       li?.price ?? li?.price_set?.shop_money?.amount ?? li?.base_price ?? li?.original_price
     );
 
-    const desc = item?.SalesDesc || item?.PurchaseDesc || li?.name || li?.title || sku;
+    const desc = pickItemDesc(item, { ...li, sku });
     const line = {
       ItemRef: ref,
       Desc: desc,
@@ -277,7 +290,7 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
       li?.price ?? rli?.subtotal ?? rli?.subtotal_set?.shop_money?.amount
     );
 
-    const desc = item?.SalesDesc || item?.PurchaseDesc || li?.name || li?.title || sku;
+    const desc = pickItemDesc(item, { ...li, sku });
     const line = {
       ItemRef: ref,
       Desc: desc,
@@ -326,7 +339,7 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
         const sku = li?.sku || li?.title || 'UNKNOWN-SKU';
         const item = resolveSkuToItem(searchItems, sku, fieldsPriority);
         const itemRef = toItemRef(item) || { FullName: sku || 'UNKNOWN-SKU' };
-        const desc = item?.SalesDesc || item?.PurchaseDesc || li?.title || li?.sku || '';
+        const desc = pickItemDesc(item, li);
 
         return {
           ItemRef: itemRef,
