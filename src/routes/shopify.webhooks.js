@@ -231,7 +231,7 @@ function collectOrderLines(order, inventoryItems, fieldsPriority) {
       li?.price ?? li?.price_set?.shop_money?.amount ?? li?.base_price ?? li?.original_price
     );
 
-    const desc = li?.name || li?.title || sku;
+    const desc = item?.SalesDesc || item?.PurchaseDesc || li?.name || li?.title || sku;
     const line = {
       ItemRef: ref,
       Desc: desc,
@@ -277,7 +277,7 @@ function collectRefundLines(refund, inventoryItems, fieldsPriority) {
       li?.price ?? rli?.subtotal ?? rli?.subtotal_set?.shop_money?.amount
     );
 
-    const desc = li?.name || li?.title || sku;
+    const desc = item?.SalesDesc || item?.PurchaseDesc || li?.name || li?.title || sku;
     const line = {
       ItemRef: ref,
       Desc: desc,
@@ -313,14 +313,30 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
     const txnDateISO = order?.processed_at || order?.created_at || new Date().toISOString();
     const txnDate = toQBDate ? toQBDate(txnDateISO) : txnDateISO.slice(0, 10); // YYYY-MM-DD
 
+    // 3b) Snapshot de inventario para obtener descripciones y refs correctas
+    const inventory = loadInventory();
+    const fieldsPriority = skuFields();
+    const searchItems = Array.isArray(inventory.allItems)
+      ? inventory.allItems
+      : inventory.items || [];
+
     // 4) Líneas de producto con Rate = precio unitario de Shopify (sin impuestos)
-    const productLines = (order?.line_items || []).map(li => ({
-      ItemRef: { FullName: li?.sku || li?.title || 'UNKNOWN-SKU' }, // ajusta si mapeas a ListID
-      Desc: li?.title || li?.sku || '',
-      Quantity: Number(li?.quantity || 0),
-      Rate: Number(li?.price ?? li?.price_set?.shop_money?.amount ?? 0),
-      SalesTaxCodeRef: { FullName: li?.taxable ? 'TAX' : 'NON' },
-    })).filter(l => l.Quantity > 0);
+    const productLines = (order?.line_items || [])
+      .map((li) => {
+        const sku = li?.sku || li?.title || 'UNKNOWN-SKU';
+        const item = resolveSkuToItem(searchItems, sku, fieldsPriority);
+        const itemRef = toItemRef(item) || { FullName: sku || 'UNKNOWN-SKU' };
+        const desc = item?.SalesDesc || item?.PurchaseDesc || li?.title || li?.sku || '';
+
+        return {
+          ItemRef: itemRef,
+          Desc: desc,
+          Quantity: Number(li?.quantity || 0),
+          Rate: Number(li?.price ?? li?.price_set?.shop_money?.amount ?? 0),
+          SalesTaxCodeRef: { FullName: li?.taxable ? 'TAX' : 'NON' },
+        };
+      })
+      .filter((l) => l.Quantity > 0);
 
     
     const SHIPPING_ITEM_NAME = 'SHIPPING WITH GUARANTEE';
