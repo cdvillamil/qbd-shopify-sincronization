@@ -5,6 +5,8 @@ const morgan  = require('morgan');
 const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
+const http    = require('http');
+const https   = require('https');
 const { buildInventoryQueryXML } = require('./services/inventory');
 const { parseInventoryFromQBXML } = require('./services/inventoryParser');
 const { buildInventoryAdjustmentXML } = require('./services/qbd.adjustment');
@@ -38,6 +40,80 @@ const LAST_RESPONSE_MAX_AGE_MS = LAST_RESPONSE_MAX_AGE_HOURS > 0
   ? LAST_RESPONSE_MAX_AGE_HOURS * 60 * 60 * 1000
   : 0;
 const LAST_RESPONSE_PATTERN = /^last-response-\d+\.xml$/;
+
+const runtimeState = {
+  lastExternalRequestAt: 0,
+};
+
+function toPositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function startPeriodicHealthPing(state = runtimeState) {
+  const rawEnabled = String(process.env.HEALTHZ_PING_ENABLED || '').trim().toLowerCase();
+  const hasExplicitFlag = rawEnabled !== '';
+  const enabled = hasExplicitFlag
+    ? /^(1|true|yes)$/i.test(rawEnabled)
+    : Boolean(process.env.WEBSITE_HOSTNAME);
+
+  if (!enabled) {
+    console.log('[healthz-ping] disabled (set HEALTHZ_PING_ENABLED=true to enable).');
+    return;
+  }
+
+  const intervalMs = toPositiveInteger(process.env.HEALTHZ_PING_INTERVAL_MS, 5 * 60 * 1000);
+  const timeoutMs = toPositiveInteger(process.env.HEALTHZ_PING_TIMEOUT_MS, 10 * 1000);
+  const explicitUrl = String(process.env.HEALTHZ_PING_URL || '').trim();
+  const derivedUrl = process.env.WEBSITE_HOSTNAME
+    ? `https://${process.env.WEBSITE_HOSTNAME}/healthz`
+    : `http://127.0.0.1:${PORT}/healthz`;
+  const targetUrl = explicitUrl || derivedUrl;
+
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch (err) {
+    console.warn('[healthz-ping] invalid HEALTHZ_PING_URL, skipping periodic ping:', targetUrl);
+    return;
+  }
+
+  const client = parsed.protocol === 'https:' ? https : http;
+  const requestOptions = {
+    protocol: parsed.protocol,
+    hostname: parsed.hostname,
+    port: parsed.port || undefined,
+    path: `${parsed.pathname}${parsed.search}`,
+    method: 'GET',
+    timeout: timeoutMs,
+    headers: { 'user-agent': 'qbd-shopify-healthz-ping/1.0' },
+  };
+
+  const pingOnce = () => {
+    const idleMs = Date.now() - Number(state?.lastExternalRequestAt || 0);
+    if (idleMs > 0 && idleMs < intervalMs) {
+      return;
+    }
+
+    const req = client.request(requestOptions, (res) => {
+      res.resume();
+      if (res.statusCode && res.statusCode >= 400) {
+        console.warn('[healthz-ping] non-success status:', res.statusCode);
+      } else if (/^(1|true|yes)$/i.test(String(process.env.HEALTHZ_PING_LOG_SUCCESS || '').trim())) {
+        console.log('[healthz-ping] success status:', res.statusCode || 'unknown');
+      }
+    });
+
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', (err) => console.warn('[healthz-ping] failed:', err?.message || err));
+    req.end();
+  };
+
+  console.log(`[healthz-ping] enabled; target=${targetUrl}; intervalMs=${intervalMs}; timeoutMs=${timeoutMs}`);
+  pingOnce();
+  setInterval(pingOnce, intervalMs);
+}
 
 function pruneLastResponses() {
   try {
@@ -364,6 +440,13 @@ function filterInventoryForToday(items, now = new Date()){
 /* ===== App ===== */
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
+
+app.use((req, _res, next) => {
+  if (req.path !== '/healthz') {
+    runtimeState.lastExternalRequestAt = Date.now();
+  }
+  next();
+});
 
 app.use('/debug', require('./routes/debug.inventory'));
 app.use('/shopify', require('./routes/shopify.webhooks'));
@@ -769,4 +852,7 @@ app.post(BASE_PATH, (req,res)=>{
 });
 
 /* Start */
-app.listen(PORT, ()=> console.log(`[QBWC] Listening http://localhost:${PORT}${BASE_PATH}`));
+app.listen(PORT, () => {
+  startPeriodicHealthPing();
+  console.log(`[QBWC] Listening http://localhost:${PORT}${BASE_PATH}`);
+});
