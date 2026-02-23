@@ -52,8 +52,16 @@ function toPositiveInteger(value, fallback) {
 }
 
 function startPeriodicHealthPing(state = runtimeState) {
-  const enabled = /^(1|true|yes)$/i.test(String(process.env.HEALTHZ_PING_ENABLED || '').trim());
-  if (!enabled) return;
+  const rawEnabled = String(process.env.HEALTHZ_PING_ENABLED || '').trim().toLowerCase();
+  const hasExplicitFlag = rawEnabled !== '';
+  const enabled = hasExplicitFlag
+    ? /^(1|true|yes)$/i.test(rawEnabled)
+    : Boolean(process.env.WEBSITE_HOSTNAME);
+
+  if (!enabled) {
+    console.log('[healthz-ping] disabled (set HEALTHZ_PING_ENABLED=true to enable).');
+    return;
+  }
 
   const intervalMs = toPositiveInteger(process.env.HEALTHZ_PING_INTERVAL_MS, 5 * 60 * 1000);
   const timeoutMs = toPositiveInteger(process.env.HEALTHZ_PING_TIMEOUT_MS, 10 * 1000);
@@ -92,6 +100,8 @@ function startPeriodicHealthPing(state = runtimeState) {
       res.resume();
       if (res.statusCode && res.statusCode >= 400) {
         console.warn('[healthz-ping] non-success status:', res.statusCode);
+      } else if (/^(1|true|yes)$/i.test(String(process.env.HEALTHZ_PING_LOG_SUCCESS || '').trim())) {
+        console.log('[healthz-ping] success status:', res.statusCode || 'unknown');
       }
     });
 
