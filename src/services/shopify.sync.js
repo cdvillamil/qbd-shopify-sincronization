@@ -395,7 +395,7 @@ async function buildPlan(limit, options = {}) {
       if (includeNoSku) {
         const op = {
           sku: null,
-          target: Number(it?.QuantityOnHand || 0),
+          target: Math.max(0, Number(it?.QuantityOnHand || 0)),
           inventory_item_id: null,
           action: 'MISSING_SKU',
           snapshotIndex: idx,
@@ -407,7 +407,7 @@ async function buildPlan(limit, options = {}) {
       continue;
     }
 
-    const qty = Number(it.QuantityOnHand || 0);
+    const qty = Math.max(0, Number(it.QuantityOnHand || 0));
     let variant = null;
     try {
       // 1) Búsqueda exacta por SKU con GraphQL (fiable)
