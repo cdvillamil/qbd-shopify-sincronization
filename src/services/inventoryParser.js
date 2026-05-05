@@ -3,18 +3,32 @@
 // en un JSON de inventario. No toca autenticación ni el flujo con QBWC.
 
 // -------- utils --------
+
+// QBD uses Windows-1252 encoding internally; numeric entities 128-159 map to
+// Windows-1252 characters, not the Unicode control characters they'd be in strict XML.
+const CP1252 = {
+  128:'€',130:',',131:'f',132:'"',133:'…',134:'†',135:'‡',
+  136:'ˆ',137:'‰',138:'Š',139:'‹',140:'Œ',145:"'",146:"'",
+  147:'"',148:'"',149:'•',150:'–',151:'—',152:'˜',153:'™',
+  154:'š',155:'›',156:'œ',159:'Ÿ',
+};
+
 function decodeEntities(str) {
   if (!str) return str;
   return str
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const n = Number(dec);
+      return CP1252[n] ?? (n >= 32 ? String.fromCodePoint(n) : '');
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const n = parseInt(hex, 16);
+      return n >= 32 ? String.fromCodePoint(n) : '';
+    })
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
-    .replace(/&#34;/g, '"')
-    .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#174;/g, '®')
-    .replace(/&#134;/g, '†');
+    .replace(/&gt;/g, '>');
 }
 
 // Toma bloques <ItemInventoryRet>...</ItemInventoryRet> (con o sin prefijo de namespace)

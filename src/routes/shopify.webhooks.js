@@ -60,8 +60,34 @@ function toItemRef(item) {
   return null;
 }
 
+const CP1252_ENTITIES = {
+  128:'€',130:',',131:'f',132:'“',133:'…',134:'†',135:'‡',
+  136:'ˆ',137:'‰',138:'Š',139:'‹',140:'Œ',
+  145:'‘',146:'’',147:'“',148:'”',149:'•',
+  150:'–',151:'—',152:'˜',153:'™',154:'š',
+  155:'›',156:'œ',159:'Ÿ',
+};
+
+function sanitizeDesc(value) {
+  if (!value) return '';
+  return String(value)
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const n = Number(dec);
+      return CP1252_ENTITIES[n] ?? (n >= 32 ? String.fromCodePoint(n) : '');
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const n = parseInt(hex, 16);
+      return n >= 32 ? String.fromCodePoint(n) : '';
+    })
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+    .trim();
+}
+
 function pickItemDesc(item, fallbackLine = {}) {
-  return (
+  const raw =
     item?.SalesDesc ||
     item?.PurchaseDesc ||
     item?.Name ||
@@ -69,8 +95,8 @@ function pickItemDesc(item, fallbackLine = {}) {
     fallbackLine?.name ||
     fallbackLine?.title ||
     fallbackLine?.sku ||
-    ''
-  );
+    '';
+  return sanitizeDesc(raw);
 }
 
 function envRef(base, fallbackFullName) {
