@@ -482,8 +482,19 @@ app.get('/debug/last-auth-cred', (req,res)=>{
 });
 app.get('/debug/last-response', (req, res) => sendFileSmart(res, fp('last-response.xml')));
 
-/* Nueva cola: ver y sembrar */
+/* Nueva cola: ver, sembrar e inyectar jobs manualmente */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
+
+app.post('/debug/enqueue-job', express.json(), async (req, res) => {
+  const job = req.body;
+  if (!job || typeof job !== 'object' || !job.type) {
+    return res.status(400).json({ error: 'Body must be a JSON object with at least a "type" field.' });
+  }
+  if (!job.createdAt) job.createdAt = new Date().toISOString();
+  await enqueue(job);
+  const queue = readJobs();
+  res.json({ ok: true, queued: job, queueLength: queue.length });
+});
 app.get('/debug/seed-inventory', async (req,res)=>{
   const job = { type:'inventoryQuery', ts:new Date().toISOString() };
   const rawMax = req.query.max;
