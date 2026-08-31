@@ -8,6 +8,7 @@ const path = require('path');
 const { getInventoryItemSku } = require('../services/shopify.client');
 const { resolveSkuToItem } = require('../services/sku-map');
 const { enqueueJob, LOG_DIR } = require('../services/jobQueue');
+const { buildDiscountLine } = require('../services/shopify.discountLine');
 
 const router = express.Router();
 
@@ -231,19 +232,6 @@ function buildShippingLines(order) {
   return out;
 }
 
-function buildDiscountLine(order) {
-  const discount = parseMoney(order?.total_discounts);
-  if (!discount || discount <= 0) return null;
-  const ref = envRef('QBD_SHOPIFY_DISCOUNT_ITEM');
-  if (!ref) return null;
-  return {
-    ItemRef: { ...ref },
-    Desc: 'Shopify discount',
-    Quantity: 1,
-    Rate: -discount,
-  };
-}
-
 function collectOrderLines(order, inventoryItems, fieldsPriority) {
   const linesIn = Array.isArray(order?.line_items) ? order.line_items : [];
   const matched = [];
@@ -410,17 +398,14 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
         }]
       : [];
 
-    // 6) Descuento total (opcional, si tu builder lo soporta como DiscountLineAdd)
-    const discountAmount = Number(order?.total_discounts || 0);
-    const discountPayload = (discountAmount > 0)
-      ? { discountAmount, discountDesc: (order?.discount_codes?.map(d => d?.code).join(', ') || 'Discounts') }
-      : {};
+    // 6) Descuento total como línea negativa (ítem QBD "Discount" o QBD_SHOPIFY_DISCOUNT_ITEM)
+    const discountLine = buildDiscountLine(order);
 
-    // 7) Ensambla líneas finales
+    // 7) Ensambla líneas finales (descuento antes del envío: aplica sobre mercancía)
     const lines = [
       ...productLines,
+      ...(discountLine ? [discountLine] : []),
       ...shippingLine,
-      // si usas ítem de descuento como línea negativa, agrégalo aquí en vez del payload de descuento total
     ];
 
     // 8) Si no hay líneas, no encolar (evita invoice vacío)
@@ -448,7 +433,6 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
       shipAddress: null, // evita problemas con caracteres no válidos en XML
       itemSalesTaxRef,
       lines,
-      ...discountPayload,
     };
 
     await enqueueJob({
