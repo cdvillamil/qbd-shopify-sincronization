@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { findVariantBySKU, getInventoryItemSku, setInventoryLevel } = require('./shopify.client');
+const { setInventoryLevel } = require('./shopify.client');
 const { LOG_DIR, ensureDir: ensureLogDir } = require('./jobQueue');
 // Polyfill: usa fetch nativo (Node>=18) o node-fetch si hace falta
 const _fetch = (typeof fetch === 'function')
@@ -31,9 +31,6 @@ const SNAP_BAK_PATH = `${SNAP_PATH}.bak`;
 const SNAP_TMP_PATH = `${SNAP_PATH}.tmp`;
 const LAST_PUSH_PATH = path.join(LOG_DIR, 'shopify-last-pushed.json');
 const LOCK_PATH = path.join(LOG_DIR, 'shopify-sync.lock');
-const INITIAL_SWEEP_STATUS_PATH = path.join(LOG_DIR, 'initial-sweep-status.json');
-const INITIAL_SWEEP_QBD_ONLY_PATH = path.join(LOG_DIR, 'initial-sweep-qbd-only.json');
-const INITIAL_SWEEP_SHOPIFY_ONLY_PATH = path.join(LOG_DIR, 'initial-sweep-shopify-only.json');
 const LOCK_ERROR_CODE = 'SHOPIFY_SYNC_LOCKED';
 
 // --- Debug helpers ---
@@ -88,70 +85,65 @@ async function shopifyGraphQL(query, variables) {
   }
 }
 
-// Devuelve { variant_id, inventory_item_id, sku } o null
-async function findVariantBySkuGQL(sku) {
-  const s = String(sku || '').trim();
-  if (!s) return null;
+// Normaliza un SKU para comparar: colapsa espacios, recorta y pasa a mayúsculas.
+function normSku(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+// Escapa un valor para incrustarlo entre comillas en la query de búsqueda de Shopify.
+function escapeSearchValue(v) {
+  return String(v == null ? '' : v).replace(/(["\\])/g, '\\$1');
+}
+
+/**
+ * Busca la variante de Shopify por SKU (solo GraphQL; el REST top-level ya no
+ * filtra de forma fiable en las versiones actuales de la API).
+ * Devuelve { variant_id, inventory_item_id, sku, matchType, source } o null.
+ *   matchType: 'exact' | 'normalized'
+ * Si no hay match pero la búsqueda devolvió candidatos, se agregan a `outCandidates`.
+ */
+async function findVariantBySkuGQL(sku, outCandidates) {
+  const raw = String(sku || '').trim();
+  if (!raw) return null;
+  const target = normSku(raw);
 
   const gql = `query FindVariantBySku($query: String!) {
-    productVariants(first: 5, query: $query) {
-      edges {
-        node {
-          id
-          sku
-          inventoryItem { id }
-        }
-      }
+    productVariants(first: 20, query: $query) {
+      edges { node { id sku displayName inventoryItem { id } } }
     }
   }`;
 
-  const data = await shopifyGraphQL(gql, { query: `sku:${JSON.stringify(s)}` });
-
-  const node = data?.productVariants?.edges?.find(e => e?.node?.sku?.trim() === s)?.node;
-  if (!node) return null;
-
-  const variant_id = Number((node.id || '').match(/ProductVariant\/(\d+)/)?.[1]);
-  const inventory_item_id = Number((node.inventoryItem?.id || '').match(/InventoryItem\/(\d+)/)?.[1]);
-  if (!variant_id || !inventory_item_id) return null;
-
-  return { variant_id, inventory_item_id, sku: node.sku, source: 'gql' };
-}
-
-async function confirmRestVariant(variant, sku) {
-  if (!variant || !variant.inventory_item_id) return null;
-
+  let nodes = [];
   try {
-    const remoteSku = await getInventoryItemSku(variant.inventory_item_id);
-    const normalizedRemote = String(remoteSku || '').trim();
-    const normalizedSku = String(sku || '').trim();
-
-    if (!normalizedRemote) {
-      if (DEBUG) dbg('REST variant rejected: empty remote SKU', { sku, inventory_item_id: variant.inventory_item_id });
-      return null;
-    }
-
-    if (normalizedRemote !== normalizedSku) {
-      if (DEBUG) {
-        dbg('REST variant rejected: SKU mismatch', {
-          requested: normalizedSku,
-          remote: normalizedRemote,
-          inventory_item_id: variant.inventory_item_id,
-        });
-      }
-      return null;
-    }
-
-    return { ...variant, source: 'rest' };
+    const data = await shopifyGraphQL(gql, { query: `sku:"${escapeSearchValue(raw)}"` });
+    nodes = (data?.productVariants?.edges || []).map(e => e?.node).filter(Boolean);
   } catch (err) {
-    if (DEBUG) {
-      dbg('REST variant confirmation failed', {
-        sku,
-        inventory_item_id: variant.inventory_item_id,
-        error: err?.message || err,
-      });
+    console.error('[sync] GraphQL SKU search failed', { sku: raw, error: err?.message || err });
+    return null;
+  }
+
+  if (Array.isArray(outCandidates)) {
+    for (const n of nodes) if (n.sku) outCandidates.push(n.sku);
+  }
+
+  let node = nodes.find(n => String(n.sku || '').trim() === raw);
+  let matchType = node ? 'exact' : null;
+  if (!node) {
+    node = nodes.find(n => normSku(n.sku) === target);
+    if (node) matchType = 'normalized';
+  }
+  if (!node) {
+    if (DEBUG && nodes.length) {
+      dbg('SKU sin match exacto', { requested: raw, candidates: nodes.map(n => n.sku) });
     }
     return null;
   }
+
+  const variant_id = Number(String(node.id || '').match(/ProductVariant\/(\d+)/)?.[1]);
+  const inventory_item_id = Number(String(node.inventoryItem?.id || '').match(/InventoryItem\/(\d+)/)?.[1]);
+  if (!variant_id || !inventory_item_id) return null;
+
+  return { variant_id, inventory_item_id, sku: node.sku, matchType, source: 'gql' };
 }
 
 // --- SKU field priority ---
@@ -268,13 +260,6 @@ function readJsonFile(pathname) {
   }
 }
 
-function boolFromEnv(value) {
-  return /^(1|true|yes)$/i.test(String(value || '').trim());
-}
-
-function isInitialSweepEnabled() {
-  return boolFromEnv(process.env.INITIAL_SWEEP_ENABLED || process.env.SHOPIFY_INITIAL_SWEEP || '');
-}
 function saveLastPush(plan) {
   const payload = { pushedAt: new Date().toISOString(), ...plan };
   ensureLogDir();
@@ -333,54 +318,17 @@ function acquireLock() {
   };
 }
 
-function pruneSnapshot(successIndices, successListIds) {
-  if ((!successIndices || successIndices.size === 0)
-    && (!successListIds || successListIds.size === 0)) {
-    return { removed: 0, remaining: null };
-  }
-
-  const snapshot = loadSnapshot();
-  const originalItems = Array.isArray(snapshot.items) ? snapshot.items : [];
-  if (!originalItems.length) {
-    return { removed: 0, remaining: 0 };
-  }
-
-  const remainingItems = originalItems.filter((item, idx) => {
-    const idxMatch = successIndices?.has(idx);
-    const listId = item?.ListID;
-    const listIdMatch = listId != null && successListIds?.has(String(listId));
-    return !(idxMatch || listIdMatch);
-  });
-
-  if (remainingItems.length === originalItems.length) {
-    return { removed: 0, remaining: remainingItems.length };
-  }
-
-  const updatedSnapshot = { ...snapshot, items: remainingItems };
-  writeSnapshotFile(updatedSnapshot);
-  dbg('snapshot pruned', { before: originalItems.length, after: remainingItems.length });
-  return { removed: originalItems.length - remainingItems.length, remaining: remainingItems.length };
-}
-
 // --- Public API ---
-async function buildPlan(limit, options = {}) {
-  const { useAllItems = false, includeNoSku = false, includeItemDetails = false } = options || {};
+async function buildPlan(limit) {
   const snapshot = loadSnapshot();
-  const selectedItems = useAllItems && Array.isArray(snapshot.allItems)
-    ? snapshot.allItems
-    : Array.isArray(snapshot.items) ? snapshot.items : [];
-  const items = Array.isArray(selectedItems) ? selectedItems : [];
+  const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const fields = getSkuFieldsPriority();
-  dbg('dryRun start', {
-    limit: Number(limit || 0),
-    snapshotCount: items.length,
-    useAllItems,
-  });
+  dbg('buildPlan start', { limit: Number(limit || 0), snapshotCount: items.length });
 
   const out = [];
-  if (!items || items.length === 0) {
-    dbg('dryRun: snapshot empty → no ops');
-    return { fields, ops: out, sourceItems: items, snapshotSource: useAllItems ? 'allItems' : 'items' };
+  if (items.length === 0) {
+    dbg('buildPlan: snapshot vacío → sin ops');
+    return { fields, ops: out, sourceItems: items };
   }
 
   let logged = 0;
@@ -389,41 +337,24 @@ async function buildPlan(limit, options = {}) {
     const sku = pickSku(it, fields);
     if (!sku) {
       if (DEBUG && logged < LOG_N) {
-        dbg('item without SKU by fields', { fields, itemKeys: Object.keys(it || {}) });
+        dbg('item sin SKU por fields', { fields, itemKeys: Object.keys(it || {}) });
         logged++;
-      }
-      if (includeNoSku) {
-        const op = {
-          sku: null,
-          target: Math.max(0, Number(it?.QuantityOnHand || 0)),
-          inventory_item_id: null,
-          action: 'MISSING_SKU',
-          snapshotIndex: idx,
-          listId: it?.ListID || null,
-        };
-        if (includeItemDetails) op.item = it;
-        out.push(op);
       }
       continue;
     }
 
     const qty = Math.max(0, Number(it.QuantityOnHand || 0));
     let variant = null;
+    const candidates = [];
     try {
-      // 1) Búsqueda exacta por SKU con GraphQL (fiable)
-      variant = await findVariantBySkuGQL(sku);
-      if (!variant) {
-        // 2) Fallback a tu buscador REST existente (por compatibilidad).
-        const restVariant = await findVariantBySKU(sku);
-        variant = await confirmRestVariant(restVariant, sku);
-      }
-
+      variant = await findVariantBySkuGQL(sku, candidates);
       if (DEBUG && logged < LOG_N) {
         dbg('SKU lookup', {
           sku, qty,
           found: !!variant,
-          source: variant?.source || 'rest',
-          inventory_item_id: variant?.inventory_item_id
+          matchType: variant?.matchType || null,
+          inventory_item_id: variant?.inventory_item_id,
+          candidates: variant ? undefined : candidates,
         });
         logged++;
       }
@@ -431,27 +362,29 @@ async function buildPlan(limit, options = {}) {
       console.error('[sync] SKU lookup error for', sku, String(err));
     }
 
-
-    out.push({
+    const op = {
       sku,
       target: qty,
       inventory_item_id: variant?.inventory_item_id || null,
       action: variant ? 'SET_AVAILABLE' : 'NO_MATCH',
+      matchType: variant?.matchType || null,
       snapshotIndex: idx,
       listId: it?.ListID || null,
-      ...(includeItemDetails ? { item: it } : {}),
-    });
+    };
+    if (!variant && candidates.length) {
+      op.candidates = Array.from(new Set(candidates)).slice(0, 10);
+    }
+    out.push(op);
 
     if (limit && out.length >= Number(limit)) break;
   }
 
-  dbg('dryRun result:', { ops: out.length, setAvailable: out.filter(x => x.action === 'SET_AVAILABLE').length, noMatch: out.filter(x => x.action === 'NO_MATCH').length });
-  return {
-    fields,
-    ops: out,
-    sourceItems: items,
-    snapshotSource: useAllItems ? 'allItems' : 'items',
-  };
+  dbg('buildPlan result:', {
+    ops: out.length,
+    setAvailable: out.filter(x => x.action === 'SET_AVAILABLE').length,
+    noMatch: out.filter(x => x.action === 'NO_MATCH').length,
+  });
+  return { fields, ops: out, sourceItems: items };
 }
 
 async function dryRun(limit) {
@@ -481,7 +414,7 @@ async function apply(limit) {
 
     if (!plan.ops.length) {
       dbg('apply: no ops to execute');
-      const payload = saveLastPush({ results, snapshotPruned: { removed: 0, remaining: null } });
+      const payload = saveLastPush({ results });
       return { fields: plan.fields, results, lastPush: payload };
     }
 
@@ -501,45 +434,70 @@ async function apply(limit) {
       }
     }
 
-    const successIndices = new Set();
-    const successListIds = new Set();
-    for (const r of results) {
-      if (!r || !r.ok) continue;
-      if (r.action !== 'SET_AVAILABLE') continue;
-      if (!r.inventory_item_id) continue;
-
-      if (Number.isInteger(r.snapshotIndex)) successIndices.add(r.snapshotIndex);
-      if (r.listId != null) successListIds.add(String(r.listId));
+    // Persistir el resultado por ítem en el estado de sincronización.
+    let stateSummary = { ok: 0, unmatched: 0, error: 0 };
+    try {
+      const { recordResults } = require('./syncState');
+      const s = recordResults(results);
+      stateSummary = { ok: s.ok, unmatched: s.unmatched, error: s.error };
+      writeJsonFile(path.join(LOG_DIR, 'shopify-unmatched.json'), {
+        generatedAt: new Date().toISOString(),
+        count: s.unmatchedItems.length,
+        items: s.unmatchedItems,
+      });
+    } catch (err) {
+      console.error('[sync] syncState update failed:', err?.message || err);
     }
 
-    const pruned = pruneSnapshot(successIndices, successListIds);
-    const payload = saveLastPush({ results, snapshotPruned: pruned });
-    dbg('apply done', {
-      ok: results.filter(r => r.ok).length,
-      failed: results.filter(r => !r.ok).length,
-      pruned,
-    });
-    return { fields: plan.fields, results, lastPush: payload };
+    const summary = summarizeResults(results);
+    try {
+      writeJsonFile(path.join(LOG_DIR, 'shopify-sync-health.json'), {
+        finishedAt: new Date().toISOString(),
+        planned: plan.ops.length,
+        success: summary.success,
+        failed: summary.failed,
+        state: stateSummary,
+        errors: summary.errors,
+      });
+    } catch (err) {
+      console.error('[sync] sync-health write failed:', err?.message || err);
+    }
+
+    const payload = saveLastPush({ results, stateSummary });
+    dbg('apply done', { ok: summary.success, failed: summary.failed, state: stateSummary });
+    return { fields: plan.fields, results, lastPush: payload, stateSummary };
   } finally {
     if (typeof releaseLock === 'function') releaseLock();
   }
 }
 
 function parseGid(gid, type) {
-  const match = String(gid || '').match(new RegExp(`${type}/(\d+)`));
+  // OJO: en un template literal `\d` se colapsa a `d`; hay que escaparlo como `\\d`.
+  const match = String(gid || '').match(new RegExp(`${type}/(\\d+)`));
   if (!match) return null;
   const n = Number(match[1]);
   return Number.isFinite(n) ? n : null;
 }
 
-async function fetchAllShopifyVariants() {
+function locationGid() {
+  const raw = String(process.env.SHOPIFY_LOCATION_ID || '').trim();
+  if (!raw) return null;
+  return /^gid:/.test(raw) ? raw : `gid://shopify/Location/${raw}`;
+}
+
+async function fetchAllShopifyVariants({ withAvailable = false } = {}) {
   const variants = [];
-  const configuredPageSize = Number(process.env.SHOPIFY_INITIAL_SWEEP_PAGE_SIZE);
+  const configuredPageSize = Number(process.env.SHOPIFY_VARIANTS_PAGE_SIZE);
   const pageSize = Number.isFinite(configuredPageSize) && configuredPageSize > 0
     ? Math.min(250, Math.max(1, Math.floor(configuredPageSize)))
     : 250;
   let cursor = null;
   let loops = 0;
+
+  const loc = withAvailable ? locationGid() : null;
+  const availableField = loc
+    ? `inventoryLevel(locationId: ${JSON.stringify(loc)}) { quantities(names: ["available"]) { name quantity } }`
+    : '';
 
   while (true) {
     loops += 1;
@@ -556,7 +514,7 @@ async function fetchAllShopifyVariants() {
             id
             sku
             title
-            inventoryItem { id sku }
+            inventoryItem { id sku ${availableField} }
             product { id title handle }
           }
         }
@@ -576,6 +534,13 @@ async function fetchAllShopifyVariants() {
       const inventoryItemId = parseGid(node.inventoryItem?.id, 'InventoryItem');
       const productId = parseGid(node.product?.id, 'Product');
       const skuValue = (node.sku || node.inventoryItem?.sku || '').trim();
+
+      let available = null;
+      if (loc) {
+        const q = node.inventoryItem?.inventoryLevel?.quantities?.find(x => x?.name === 'available');
+        if (q && Number.isFinite(Number(q.quantity))) available = Number(q.quantity);
+      }
+
       variants.push({
         sku: skuValue,
         variantId,
@@ -585,6 +550,7 @@ async function fetchAllShopifyVariants() {
         productHandle: node.product?.handle || null,
         variantTitle: node.title || null,
         rawSku: node.sku || null,
+        available,
       });
     }
 
@@ -595,55 +561,6 @@ async function fetchAllShopifyVariants() {
   }
 
   return variants;
-}
-
-function buildQbdUnmatched(plan) {
-  const items = Array.isArray(plan?.sourceItems) ? plan.sourceItems : [];
-  const unmatched = [];
-  const skuSet = new Set();
-
-  for (const op of Array.isArray(plan?.ops) ? plan.ops : []) {
-    const normalizedSku = (op?.sku || '').trim();
-    if (normalizedSku) skuSet.add(normalizedSku);
-
-    if (op?.action === 'NO_MATCH' || op?.action === 'MISSING_SKU') {
-      const item = Number.isInteger(op.snapshotIndex) ? items[op.snapshotIndex] : null;
-      unmatched.push({
-        sku: normalizedSku || null,
-        listId: op?.listId || item?.ListID || null,
-        name: item?.FullName || item?.Name || null,
-        quantityOnHand: Number(item?.QuantityOnHand ?? op?.target ?? 0) || 0,
-        action: op?.action || 'NO_MATCH',
-      });
-    }
-  }
-
-  return { unmatched, skuSet };
-}
-
-function buildShopifyOnly(variants, qbdSkuSet) {
-  if (!Array.isArray(variants) || variants.length === 0) {
-    return [];
-  }
-
-  const out = [];
-  for (const variant of variants) {
-    const normalizedSku = (variant?.sku || '').trim();
-    if (!normalizedSku) continue;
-    if (qbdSkuSet.has(normalizedSku)) continue;
-
-    out.push({
-      sku: normalizedSku,
-      variantId: variant?.variantId || null,
-      inventoryItemId: variant?.inventoryItemId || null,
-      productId: variant?.productId || null,
-      productTitle: variant?.productTitle || null,
-      productHandle: variant?.productHandle || null,
-      variantTitle: variant?.variantTitle || null,
-    });
-  }
-
-  return out;
 }
 
 function summarizeResults(results) {
@@ -661,136 +578,297 @@ function summarizeResults(results) {
   return { success, failed, errors };
 }
 
-function readInitialSweepStatus() {
-  return readJsonFile(INITIAL_SWEEP_STATUS_PATH);
+/**
+ * Comparación en vivo QBD (allItems del último snapshot) vs Shopify por SKU.
+ * No compara cantidades (eso llega en la reconciliación completa); revela qué
+ * ítems de QBD no tienen variante en Shopify (causa de los NO_MATCH) y viceversa.
+ */
+async function computeDrift() {
+  const snapshot = loadSnapshot();
+  const qbdItems = Array.isArray(snapshot.allItems) && snapshot.allItems.length
+    ? snapshot.allItems
+    : (Array.isArray(snapshot.items) ? snapshot.items : []);
+  const fields = getSkuFieldsPriority();
+  const variants = await fetchAllShopifyVariants();
+
+  // Comparación con la misma normalización que usa el push real (normSku).
+  const shopSkus = new Set();
+  for (const v of variants) {
+    const s = normSku(v.sku);
+    if (s) shopSkus.add(s);
+  }
+
+  const qbdOnly = [];
+  const qbdSkus = new Set();
+  for (const it of qbdItems) {
+    const sku = pickSku(it, fields);
+    const qbdQty = Math.max(0, Number(it?.QuantityOnHand || 0));
+    if (!sku) {
+      qbdOnly.push({ listId: it?.ListID || null, name: it?.FullName || it?.Name || null, qbdQty, reason: 'MISSING_SKU' });
+      continue;
+    }
+    qbdSkus.add(normSku(sku));
+    if (!shopSkus.has(normSku(sku))) {
+      qbdOnly.push({ listId: it?.ListID || null, sku, name: it?.FullName || it?.Name || null, qbdQty, reason: 'NO_SHOPIFY_VARIANT' });
+    }
+  }
+
+  const shopifyOnly = [];
+  for (const v of variants) {
+    const s = (v.sku || '').trim();
+    if (!s) continue;
+    if (!qbdSkus.has(normSku(s))) {
+      shopifyOnly.push({ sku: s, variantId: v.variantId, productTitle: v.productTitle, productHandle: v.productHandle });
+    }
+  }
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    qbdCatalog: qbdItems.length,
+    shopifyVariants: variants.length,
+    qbdUnmatched: qbdOnly.length,
+    shopifyUnmatched: shopifyOnly.length,
+    skuFields: fields,
+    qbdOnly,
+    shopifyOnly,
+  };
+
+  try {
+    writeJsonFile(path.join(LOG_DIR, 'shopify-drift.json'), report);
+  } catch (err) {
+    console.error('[sync] drift report write failed:', err?.message || err);
+  }
+  return report;
 }
 
-function readInitialSweepUnmatchedQbd() {
-  return readJsonFile(INITIAL_SWEEP_QBD_ONLY_PATH);
+// ===================================================================
+//  Fase 3 — Reconciliación completa QBD vs Shopify (por cantidad)
+// ===================================================================
+const RECONCILE_STATUS_PATH = path.join(LOG_DIR, 'shopify-reconcile.json');
+
+function reconcileIntervalMs() {
+  const n = Number(process.env.SHOPIFY_RECONCILE_INTERVAL_MS);
+  return Number.isFinite(n) && n > 0 ? n : 6 * 60 * 60 * 1000; // 6 h
+}
+function reconcileMax() {
+  const n = Number(process.env.SHOPIFY_RECONCILE_MAX);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000;
+}
+function isReconcileEnabled() {
+  return /^(1|true|yes)$/i.test(String(process.env.SHOPIFY_RECONCILE_ENABLED || '').trim());
+}
+function readReconcileStatus() {
+  return readJsonFile(RECONCILE_STATUS_PATH);
 }
 
-function readInitialSweepUnmatchedShopify() {
-  return readJsonFile(INITIAL_SWEEP_SHOPIFY_ONLY_PATH);
-}
-
-async function runInitialSweep() {
+/**
+ * Compara TODO el catálogo de QBD (allItems del último snapshot) contra las
+ * cantidades reales de Shopify y corrige las diferencias empujando el valor de
+ * QBD (source of truth). No avanza ningún cursor: es idempotente.
+ *
+ * @param {{ limit?: number, dryRun?: boolean }} opts
+ */
+async function runReconcile(opts = {}) {
   const startedAt = new Date().toISOString();
-  writeJsonFile(INITIAL_SWEEP_STATUS_PATH, { status: 'running', startedAt });
+  const dry = Boolean(opts.dryRun);
+  const cap = Math.max(1, Math.floor(opts.limit || reconcileMax()));
 
   let releaseLock;
   try {
     releaseLock = acquireLock();
   } catch (err) {
-    const payload = {
-      status: 'failed',
-      startedAt,
-      finishedAt: new Date().toISOString(),
-      error: String(err?.message || err),
-      code: err?.code || null,
-    };
-    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, payload);
+    // Colisión con otro sync: no marcamos 'failed' (se reintenta en el próximo poll).
+    if (!(err && err.code === LOCK_ERROR_CODE)) {
+      const payload = { status: 'failed', startedAt, finishedAt: new Date().toISOString(),
+        error: String(err?.message || err), code: err?.code || null };
+      try { writeJsonFile(RECONCILE_STATUS_PATH, payload); } catch (_) {}
+    }
     throw err;
   }
 
   try {
-    const plan = await buildPlan(undefined, {
-      useAllItems: true,
-      includeNoSku: true,
-      includeItemDetails: true,
-    });
-    const { unmatched: qbdUnmatched, skuSet } = buildQbdUnmatched(plan);
-    const shopifyVariants = await fetchAllShopifyVariants();
-    const shopifyOnly = buildShopifyOnly(shopifyVariants, skuSet);
+    writeJsonFile(RECONCILE_STATUS_PATH, { status: 'running', startedAt, dryRun: dry });
 
-    const generatedAt = new Date().toISOString();
-    writeJsonFile(INITIAL_SWEEP_QBD_ONLY_PATH, {
-      generatedAt,
-      count: qbdUnmatched.length,
-      items: qbdUnmatched,
-    });
-    writeJsonFile(INITIAL_SWEEP_SHOPIFY_ONLY_PATH, {
-      generatedAt,
-      count: shopifyOnly.length,
-      items: shopifyOnly,
-    });
+    if (!locationGid()) {
+      throw new Error('SHOPIFY_LOCATION_ID no configurado; no se puede leer la cantidad real de Shopify.');
+    }
 
-    const operations = plan.ops.filter(op => op?.action === 'SET_AVAILABLE' && op?.inventory_item_id);
-    const results = [];
-    for (const op of operations) {
-      try {
-        await setInventoryLevel(op.inventory_item_id, op.target);
-        results.push({ ...op, ok: true });
-      } catch (err) {
-        console.error('[sync] initial sweep setInventoryLevel error', {
-          sku: op?.sku,
-          inventory_item_id: op?.inventory_item_id,
-          target: op?.target,
-          error: err?.message || err,
+    const snapshot = loadSnapshot();
+    const qbdItems = Array.isArray(snapshot.allItems) && snapshot.allItems.length
+      ? snapshot.allItems
+      : (Array.isArray(snapshot.items) ? snapshot.items : []);
+    if (!qbdItems.length) {
+      throw new Error('No hay catálogo de QBD en last-inventory.json; corre un inventoryQuery primero.');
+    }
+
+    const fields = getSkuFieldsPriority();
+    const variants = await fetchAllShopifyVariants({ withAvailable: true });
+    const shopBySku = new Map();
+    for (const v of variants) {
+      const k = normSku(v.sku);
+      if (k && !shopBySku.has(k)) shopBySku.set(k, v);
+    }
+
+    const toFix = [];
+    const unmatched = [];
+    const verified = []; // ya alineados: {listId, sku, qbdQty, shopifyQty}
+    let diffsTotal = 0;
+
+    for (const it of qbdItems) {
+      const sku = pickSku(it, fields);
+      const listId = it?.ListID || null;
+      const qbdQty = Math.max(0, Number(it?.QuantityOnHand || 0));
+
+      if (!sku) {
+        unmatched.push({ listId, name: it?.FullName || it?.Name || null, qbdQty, reason: 'MISSING_SKU' });
+        continue;
+      }
+      const v = shopBySku.get(normSku(sku));
+      if (!v || !v.inventoryItemId) {
+        unmatched.push({ listId, sku, name: it?.FullName || it?.Name || null, qbdQty, reason: 'NO_SHOPIFY_VARIANT' });
+        continue;
+      }
+      if (v.available == null) {
+        unmatched.push({ listId, sku, qbdQty, reason: 'NO_LEVEL_AT_LOCATION' });
+        continue;
+      }
+      if (Number(v.available) === qbdQty) {
+        verified.push({ listId, sku, qbdQty, shopifyQty: Number(v.available) });
+        continue;
+      }
+      diffsTotal += 1;
+      if (toFix.length < cap) {
+        toFix.push({
+          sku, listId,
+          inventory_item_id: v.inventoryItemId,
+          target: qbdQty,
+          shopifyQtyBefore: Number(v.available),
+          action: 'SET_AVAILABLE',
         });
-        results.push({ ...op, ok: false, error: String(err?.message || err) });
       }
     }
 
-    const summary = summarizeResults(results);
-    const finishedAt = new Date().toISOString();
-    const statusPayload = {
+    const results = [];
+    if (!dry) {
+      for (const op of toFix) {
+        try {
+          await setInventoryLevel(op.inventory_item_id, op.target);
+          results.push({ ...op, ok: true });
+        } catch (e) {
+          console.error('[sync] reconcile setInventoryLevel error', { sku: op.sku, target: op.target, err: String(e?.message || e) });
+          results.push({ ...op, ok: false, error: String(e?.message || e) });
+        }
+      }
+    }
+
+    // Actualiza el estado: resultados del push + los verificados como alineados.
+    let stateSummary = { ok: 0, unmatched: 0, error: 0 };
+    if (!dry) {
+      try {
+        const { recordResults, readState, writeState } = require('./syncState');
+        const s = recordResults(results);
+        stateSummary = { ok: s.ok, unmatched: s.unmatched, error: s.error };
+
+        const state = readState();
+        const nowIso = new Date().toISOString();
+        for (const vf of verified) {
+          if (!vf.listId) continue;
+          const prev = state.byKey[String(vf.listId)] || { attempts: 0 };
+          state.byKey[String(vf.listId)] = {
+            ...prev,
+            sku: vf.sku ?? prev.sku ?? null,
+            qbdQty: vf.qbdQty,
+            shopifyQty: vf.shopifyQty,
+            status: 'ok',
+            lastAttemptAt: nowIso,
+            lastError: null,
+          };
+        }
+        for (const um of unmatched) {
+          if (!um.listId) continue;
+          const prev = state.byKey[String(um.listId)] || { attempts: 0 };
+          state.byKey[String(um.listId)] = {
+            ...prev,
+            sku: um.sku ?? prev.sku ?? null,
+            qbdQty: um.qbdQty,
+            shopifyQty: prev.shopifyQty ?? null,
+            status: 'unmatched',
+            lastAttemptAt: nowIso,
+            lastError: um.reason || 'NO_MATCH',
+          };
+          stateSummary.unmatched += 1;
+        }
+        writeState(state);
+      } catch (err) {
+        console.error('[sync] reconcile state update failed:', err?.message || err);
+      }
+    }
+
+    const report = {
       status: 'completed',
       startedAt,
-      finishedAt,
-      operationsPlanned: operations.length,
-      ...summary,
-      unmatchedQbd: qbdUnmatched.length,
-      unmatchedShopify: shopifyOnly.length,
-      snapshotSource: plan.snapshotSource,
+      finishedAt: new Date().toISOString(),
+      dryRun: dry,
+      qbdCatalog: qbdItems.length,
+      shopifyVariants: variants.length,
+      inSync: verified.length,
+      diffsFound: diffsTotal,
+      diffsProcessed: toFix.length,
+      corrected: results.filter(r => r.ok).length,
+      failed: results.filter(r => !r.ok).length,
+      unmatched: unmatched.length,
+      capped: diffsTotal > toFix.length,
+      cap,
+      state: stateSummary,
+      diffs: (dry ? toFix : results).slice(0, 1000),
+      unmatchedSample: unmatched.slice(0, 1000),
     };
-    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, statusPayload);
-    return statusPayload;
-  } catch (err) {
-    const finishedAt = new Date().toISOString();
-    writeJsonFile(INITIAL_SWEEP_STATUS_PATH, {
-      status: 'failed',
-      startedAt,
-      finishedAt,
-      error: String(err?.message || err),
-      code: err?.code || null,
+    writeJsonFile(RECONCILE_STATUS_PATH, report);
+    console.log('[sync] reconcile done', {
+      dryRun: dry, inSync: report.inSync, diffsFound: report.diffsFound,
+      corrected: report.corrected, failed: report.failed, unmatched: report.unmatched, capped: report.capped,
     });
+    return report;
+  } catch (err) {
+    const payload = { status: 'failed', startedAt, finishedAt: new Date().toISOString(),
+      error: String(err?.message || err), code: err?.code || null };
+    try { writeJsonFile(RECONCILE_STATUS_PATH, payload); } catch (_) {}
     throw err;
   } finally {
     if (typeof releaseLock === 'function') releaseLock();
   }
 }
 
-async function runInitialSweepIfNeeded() {
-  if (!isInitialSweepEnabled()) {
-    return null;
-  }
-
-  const status = readInitialSweepStatus();
-  if (status?.status === 'completed' || status?.status === 'running') {
-    return status;
-  }
-
+// Corre la reconciliación si está habilitada y venció el intervalo. No lanza.
+async function runReconcileIfDue() {
+  if (!isReconcileEnabled()) return null;
   try {
-    return await runInitialSweep();
+    const last = readReconcileStatus();
+    const lastAt = Date.parse(last?.finishedAt || '') || 0;
+    if (last?.status === 'running') return null;
+    if (last?.status === 'completed' && lastAt && Date.now() - lastAt < reconcileIntervalMs()) return null;
+    // Tras un fallo real, espera 20 min antes de reintentar (evita loops).
+    if (last?.status === 'failed' && lastAt && Date.now() - lastAt < 20 * 60 * 1000) return null;
+    if (isSyncLocked()) return null;
+    return await runReconcile();
   } catch (err) {
-    if (DEBUG) {
-      console.warn('[sync] initial sweep failed:', err?.message || err);
+    if (!(err && err.code === LOCK_ERROR_CODE)) {
+      console.error('[sync] reconcile auto-run error:', err?.message || err);
     }
-    throw err;
+    return null;
   }
 }
 
 module.exports = {
   dryRun,
   apply,
+  computeDrift,
+  runReconcile,
+  runReconcileIfDue,
+  readReconcileStatus,
+  isReconcileEnabled,
   isSyncLocked,
   findVariantBySkuGQL,
   shopifyGraphQL,
   LOCK_ERROR_CODE,
-  runInitialSweep,
-  runInitialSweepIfNeeded,
-  readInitialSweepStatus,
-  readInitialSweepUnmatchedQbd,
-  readInitialSweepUnmatchedShopify,
-  isInitialSweepEnabled,
 };

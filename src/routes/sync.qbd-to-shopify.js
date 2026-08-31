@@ -4,11 +4,9 @@ const {
   dryRun,
   apply,
   LOCK_ERROR_CODE,
-  runInitialSweepIfNeeded,
-  readInitialSweepUnmatchedQbd,
-  readInitialSweepUnmatchedShopify,
-  readInitialSweepStatus,
-  isInitialSweepEnabled,
+  runReconcile,
+  readReconcileStatus,
+  isReconcileEnabled,
 } = require('../services/shopify.sync');
 
 const router = express.Router();
@@ -43,46 +41,27 @@ router.post('/qbd-to-shopify/apply', async (req, res) => {
   }
 });
 
-router.get('/initial/status', (_req, res) => {
-  const status = readInitialSweepStatus();
-  res.json({
-    enabled: isInitialSweepEnabled(),
-    status: status || null,
-  });
+// Reconciliación completa QBD vs Shopify (por cantidad).
+router.get('/reconcile/status', (_req, res) => {
+  res.json({ enabled: isReconcileEnabled(), status: readReconcileStatus() || null });
 });
 
-router.post('/initial/run', async (_req, res) => {
-  if (!isInitialSweepEnabled()) {
-    res.status(409).json({
-      error: 'Initial sweep is disabled by environment configuration.',
-    });
-    return;
-  }
-
+// POST /sync/reconcile            -> corrige diferencias
+// POST /sync/reconcile?dryRun=1   -> solo reporta, no empuja
+// POST /sync/reconcile?limit=50   -> tope de ítems a corregir en esta corrida
+router.post('/reconcile', async (req, res) => {
+  const dryRunFlag = /^(1|true|yes)$/i.test(String(req.query.dryRun || ''));
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
   try {
-    const result = await runInitialSweepIfNeeded();
-    res.json({ ok: true, result: result || null });
-  } catch (err) {
-    res.status(500).json({ error: String(err?.message || err) });
+    const result = await runReconcile({ dryRun: dryRunFlag, limit });
+    res.json({ ok: true, result });
+  } catch (e) {
+    if (e && e.code === LOCK_ERROR_CODE) {
+      res.status(409).json({ error: e.message, code: e.code, lock: e.lock || null });
+    } else {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
   }
-});
-
-router.get('/initial/unmatched/qbd', (req, res) => {
-  const data = readInitialSweepUnmatchedQbd();
-  if (!data) {
-    res.status(404).json({ error: 'Initial sweep QBD unmatched data not available.' });
-    return;
-  }
-  res.json(data);
-});
-
-router.get('/initial/unmatched/shopify', (req, res) => {
-  const data = readInitialSweepUnmatchedShopify();
-  if (!data) {
-    res.status(404).json({ error: 'Initial sweep Shopify unmatched data not available.' });
-    return;
-  }
-  res.json(data);
 });
 
 module.exports = router;
