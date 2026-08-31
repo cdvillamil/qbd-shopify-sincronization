@@ -4,14 +4,18 @@ const fs = require('fs');
 const path = require('path');
 
 const LOG_DIR = process.env.LOG_DIR || '/tmp';
+// Carpeta para archivos voluminosos y desechables (dumps XML de debug).
+// Por defecto /tmp (efímero) para no consumir la cuota de /home cuando
+// LOG_DIR apunta a almacenamiento persistente.
+const DEBUG_DIR = process.env.DEBUG_DIR || '/tmp';
 const JOBS_FILE = path.join(LOG_DIR, 'jobs.json');
 const CURRENT_JOB_FILE = path.join(LOG_DIR, 'current-job.json');
 const JOBS_LOCK_DIR = path.join(LOG_DIR, 'jobs.lock');
 const JOBS_LOCK_RETRY_MS = 25;
 
-function ensureDir() {
+function ensureDir(dir = LOG_DIR) {
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
   } catch (e) {
     // noop: directory creation errors will surface later on write attempts
     if (process.env.DEBUG_JOB_QUEUE) {
@@ -20,7 +24,7 @@ function ensureDir() {
   }
 }
 
-function pruneLogFiles(pattern, { keep = Infinity, maxAgeMs = 0 } = {}) {
+function pruneLogFiles(pattern, { keep = Infinity, maxAgeMs = 0, dir = LOG_DIR } = {}) {
   if (!pattern) return 0;
 
   const matcher =
@@ -36,15 +40,22 @@ function pruneLogFiles(pattern, { keep = Infinity, maxAgeMs = 0 } = {}) {
     throw new TypeError('pruneLogFiles requires a RegExp, string or predicate function');
   }
 
-  ensureDir();
+  ensureDir(dir);
 
   const now = Date.now();
   const entries = [];
 
-  for (const name of fs.readdirSync(LOG_DIR)) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+
+  for (const name of names) {
     if (!matcher(name)) continue;
 
-    const fullPath = path.join(LOG_DIR, name);
+    const fullPath = path.join(dir, name);
     let ts = 0;
 
     const tsMatch = name.match(/(\d{5,})/g);
@@ -237,6 +248,7 @@ function clearCurrentJob() {
 
 module.exports = {
   LOG_DIR,
+  DEBUG_DIR,
   JOBS_FILE,
   CURRENT_JOB_FILE,
   ensureDir,
