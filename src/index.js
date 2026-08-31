@@ -26,6 +26,7 @@ const {
   ensureDir: ensureLogDir,
   pruneLogFiles,
 } = require('./services/jobQueue');
+const { recordWcSeen, startWcMonitor, wcStatus } = require('./services/wcMonitor');
 require('dotenv').config();
 
 /* ===== Config ===== */
@@ -127,11 +128,6 @@ function pruneLastResponses() {
     }
   }
 }
-
-const SKU_FIELD_PRIORITY = (process.env.QBD_SKU_FIELDS || process.env.QBD_SKU_FIELD || 'Name')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
 
 function fp(n){ return path.join(LOG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
@@ -299,144 +295,6 @@ function shouldAutoPush(){
   return /^(1|true|yes)$/i.test(String(raw).trim());
 }
 
-function getTodayRange(now = new Date()){
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start, end };
-}
-
-function parseQBDate(value){
-  if (!value) return null;
-  const dt = new Date(value);
-  return Number.isNaN(dt.valueOf()) ? null : dt;
-}
-
-function pickRelevantTimestamp(item){
-  return item?.TimeModified || item?.TimeCreated || null;
-}
-
-function pickListId(item){
-  if (!item) return null;
-  if (item.ListID != null) return String(item.ListID);
-  if (item.ListId != null) return String(item.ListId);
-  return null;
-}
-
-function pickSkuForSnapshot(item) {
-  if (!item) return null;
-  for (const field of SKU_FIELD_PRIORITY) {
-    const raw = item[field];
-    if (raw == null) continue;
-    const value = String(raw).trim();
-    if (value) return value.toUpperCase();
-  }
-  return null;
-}
-
-function buildSnapshotIndex(snapshot){
-  const map = new Map();
-  if (!snapshot) return map;
-
-  const add = (items, { pending = false, source = null } = {}) => {
-    if (!Array.isArray(items)) return;
-    for (const item of items) {
-      const id = pickListId(item);
-      if (!id) continue;
-
-      const entry = map.get(id);
-      const candidateTs = parseQBDate(pickRelevantTimestamp(item));
-      const candidate = { item, pending: Boolean(pending), source };
-
-      if (!entry) {
-        map.set(id, candidate);
-        continue;
-      }
-
-      const entryTs = parseQBDate(pickRelevantTimestamp(entry.item));
-      const mergedPending = entry.pending || candidate.pending;
-      let useCandidate = false;
-
-      if (candidate.pending && !entry.pending) {
-        useCandidate = true;
-      } else if (!entryTs) {
-        useCandidate = true;
-      } else if (candidateTs && candidateTs > entryTs) {
-        useCandidate = true;
-      }
-
-      if (useCandidate) {
-        map.set(id, { item, pending: mergedPending, source: source || entry.source || null });
-      } else if (mergedPending !== entry.pending) {
-        map.set(id, { ...entry, pending: mergedPending });
-      }
-    }
-  };
-
-  add(snapshot.allItems, { pending: false, source: 'allItems' });
-  add(snapshot.items, { pending: true, source: 'items' });
-  return map;
-}
-
-function filterUnchangedSnapshotItems(items, previousSnapshot){
-  const previousMap = buildSnapshotIndex(previousSnapshot);
-  if (!Array.isArray(items) || previousMap.size === 0) {
-    return { filtered: Array.isArray(items) ? [...items] : [], skipped: 0 };
-  }
-
-  const filtered = [];
-  let skipped = 0;
-
-  for (const item of items) {
-    const id = pickListId(item);
-    if (!id) {
-      filtered.push(item);
-      continue;
-    }
-
-    const prevEntry = previousMap.get(id);
-    if (!prevEntry) {
-      filtered.push(item);
-      continue;
-    }
-
-    if (prevEntry.pending) {
-      filtered.push(item);
-      continue;
-    }
-
-    const prev = prevEntry.item;
-    const prevQty = Number(prev?.QuantityOnHand);
-    const nextQty = Number(item?.QuantityOnHand);
-    const sameQty = Number.isFinite(prevQty) && Number.isFinite(nextQty) && prevQty === nextQty;
-
-    if (sameQty) {
-      skipped += 1;
-      continue;
-    }
-
-    const prevTs = parseQBDate(pickRelevantTimestamp(prev));
-    const nextTs = parseQBDate(pickRelevantTimestamp(item));
-    if (prevTs && nextTs && nextTs <= prevTs) {
-      skipped += 1;
-      continue;
-    }
-
-    filtered.push(item);
-  }
-
-  return { filtered, skipped };
-}
-
-function filterInventoryForToday(items, now = new Date()){
-  const { start, end } = getTodayRange(now);
-  const filtered = (items || []).filter((item) => {
-    const stamp = parseQBDate(pickRelevantTimestamp(item));
-    return stamp && stamp >= start && stamp < end;
-  });
-  return { filtered, start, end };
-}
-
 /* ===== App ===== */
 const app = express();
 app.use(morgan(process.env.LOG_LEVEL || 'dev'));
@@ -501,6 +359,30 @@ app.get('/debug/inventory', (req,res)=>{
   sendFileSmart(res, fp('last-inventory.json'));
 });
 
+/* Estado de la sincronización QBD -> Shopify (Fase 1/2) */
+app.get('/debug/sync-state', (req,res)=>sendFileSmart(res, fp('shopify-sync-state.json')));
+app.get('/debug/unmatched', (req,res)=>sendFileSmart(res, fp('shopify-unmatched.json')));
+app.get('/debug/sync-health', (req,res)=>sendFileSmart(res, fp('shopify-sync-health.json')));
+app.get('/debug/reconcile', (req,res)=>sendFileSmart(res, fp('shopify-reconcile.json')));
+app.get('/debug/wc-status', (_req,res)=>res.json(wcStatus()));
+
+// Reinicia la línea base: el próximo poll vuelve a sembrar (sin empujar).
+app.post('/debug/sync-state/reset', (req,res)=>{
+  try {
+    require('./services/syncState').resetState();
+    res.json({ ok:true, note:'sync-state borrado; el próximo inventoryQuery re-siembra sin empujar.' });
+  } catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
+
+// Comparación en vivo QBD vs Shopify (presencia de SKU). Revela los NO_MATCH.
+app.get('/debug/drift', async (req,res)=>{
+  try {
+    if (String(req.query.cached||'') === '1') return sendFileSmart(res, fp('shopify-drift.json'));
+    const { computeDrift } = require('./services/shopify.sync');
+    res.json(await computeDrift());
+  } catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
+
 app.get('/qbwc', (req, res) => {
   res.status(200).type('text/plain').send('QBWC endpoint OK');
 });
@@ -525,6 +407,13 @@ app.post(BASE_PATH, (req,res)=>{
       save('last-post-body.xml', raw);
 
       const is = (tag)=> raw.includes(`<${tag}`) || raw.includes(`<tns:${tag}`);
+
+      // Marca actividad del Web Connector (para el monitor de caídas).
+      try {
+        const wcMethod = ['authenticate','sendRequestXML','receiveResponseXML','getLastError','closeConnection','serverVersion','clientVersion','connectionError']
+          .find((t) => is(t));
+        if (wcMethod) recordWcSeen(wcMethod);
+      } catch (_) { /* noop */ }
 
       let bodyXml = '';
 
@@ -651,100 +540,49 @@ app.post(BASE_PATH, (req,res)=>{
         const current = getCurrentJob();
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
         if (current && current.type === 'inventoryQuery') {
-          const previousSnapshot = readJsonSafe('last-inventory.json');
           const parsedItems = parseInventorySnapshot(resp);
-          const { filtered: todaysItems, start, end } = filterInventoryForToday(parsedItems);
-          const { filtered: recentItems, skipped: unchangedSkipped } =
-            filterUnchangedSnapshotItems(todaysItems, previousSnapshot);
 
-          const seenSnapshotKeys = new Set();
-          const mergedItems = [];
-
-          const registerSnapshotItem = (item, source) => {
-            if (!item) return false;
-
-            const keys = [];
-            const listId = pickListId(item);
-            if (listId) keys.push(`id:${listId}`);
-
-            const sku = pickSkuForSnapshot(item);
-            if (sku) keys.push(`sku:${sku}`);
-
-            if (keys.length === 0) {
-              keys.push(`anon:${mergedItems.length}:${source || 'unknown'}`);
-            }
-
-            let alreadySeen = false;
-            for (const key of keys) {
-              if (seenSnapshotKeys.has(key)) {
-                alreadySeen = true;
-                break;
-              }
-            }
-
-            for (const key of keys) seenSnapshotKeys.add(key);
-            if (alreadySeen) return false;
-
-            mergedItems.push(item);
-            return true;
-          };
-
-          for (const item of recentItems) {
-            registerSnapshotItem(item, 'recent');
+          // Reconciliación por diferencia (reemplaza el filtro "modificado hoy").
+          // La primera corrida con estado vacío SOLO siembra la línea base; no empuja nada.
+          let selection = { toSync: [], reason: 'error', stateSize: null, catalogSize: parsedItems.length, capped: false };
+          try {
+            const { selectItemsToSync } = require('./services/syncState');
+            selection = selectItemsToSync(parsedItems);
+          } catch (err) {
+            console.error('[inventory] selectItemsToSync failed:', err);
           }
 
-          let carriedOver = 0;
-          if (Array.isArray(previousSnapshot?.items)) {
-            for (const pending of previousSnapshot.items) {
-              if (registerSnapshotItem(pending, 'carry')) {
-                carriedOver += 1;
-              }
-            }
-          }
-
-          const hasPendingCarryOver = carriedOver > 0;
-          const hasRecentChanges = recentItems.length > 0;
-          const hasWorkForSync = hasRecentChanges || hasPendingCarryOver;
+          const toSync = Array.isArray(selection.toSync) ? selection.toSync : [];
           const snapshotPayload = {
-            count: mergedItems.length,
+            count: toSync.length,
             filteredAt: new Date().toISOString(),
             filter: {
-              mode: 'TimeModifiedSameDay',
-              timezoneOffsetMinutes: new Date().getTimezoneOffset(),
-              start: start.toISOString(),
-              endExclusive: end.toISOString(),
-              sourceCount: parsedItems.length,
+              mode: 'StateDiff',
+              reason: selection.reason || null,
+              catalogSize: parsedItems.length,
+              stateSize: selection.stateSize ?? null,
+              capped: Boolean(selection.capped),
             },
-            items: mergedItems,
+            items: toSync,
             allItems: parsedItems,
-            skipped: {
-              unchanged: unchangedSkipped,
-              previousSnapshotItems: previousSnapshot?.items?.length || 0,
-              pendingCarryOver: carriedOver,
-            },
           };
 
-            saveJsonAtomic('last-inventory.json', snapshotPayload);
-            console.log('[inventory] snapshot filtered for today', {
-              totalReceived: parsedItems.length,
-              kept: mergedItems.length,
-              skippedUnchanged: unchangedSkipped,
-              carriedPending: carriedOver,
-              start: start.toISOString(),
-              end: end.toISOString(),
-            });
+          saveJsonAtomic('last-inventory.json', snapshotPayload);
+          console.log('[inventory] snapshot saved', {
+            catalog: parsedItems.length,
+            toSync: toSync.length,
+            reason: selection.reason,
+            capped: Boolean(selection.capped),
+          });
 
+          // Reconciliación completa QBD vs Shopify (throttled por intervalo).
           try {
-            const { runInitialSweepIfNeeded, isInitialSweepEnabled } = require('./services/shopify.sync');
-            if (isInitialSweepEnabled()) {
-              setImmediate(() =>
-                runInitialSweepIfNeeded().catch((err) => {
-                  console.error('Initial sweep auto-run error:', err);
-                })
-              );
-            }
+            const { runReconcileIfDue } = require('./services/shopify.sync');
+            setImmediate(() => runReconcileIfDue().catch((err) => {
+              console.error('Reconcile auto-run error:', err);
+            }));
           } catch (err) {
-            console.error('Initial sweep trigger setup failed:', err);
+            console.error('Reconcile trigger setup failed:', err);
           }
 
           // --- Auto push a Shopify (después de persistir el snapshot) ---
@@ -755,9 +593,7 @@ app.post(BASE_PATH, (req,res)=>{
 
             if (auto && !ok) {
               console.warn('Auto-push skipped due to QuickBooks error status.');
-            }
-
-            if (auto && ok && hasWorkForSync) {
+            } else if (auto && ok && toSync.length > 0) {
               const { apply, isSyncLocked, LOCK_ERROR_CODE } = require('./services/shopify.sync');
               if (isSyncLocked()) {
                 console.log('Auto-push skipped: Shopify sync already running.');
@@ -772,8 +608,8 @@ app.post(BASE_PATH, (req,res)=>{
                   })
                 );
               }
-            } else if (auto && !hasWorkForSync) {
-              console.log('Auto-push skipped: no inventory changes or pending carry-over items detected for today.');
+            } else if (auto && toSync.length === 0) {
+              console.log(`Auto-push skipped: no differences to sync (reason=${selection.reason}).`);
             }
           } catch (e) {
             console.error('Auto-push init error:', e);
@@ -854,5 +690,6 @@ app.post(BASE_PATH, (req,res)=>{
 /* Start */
 app.listen(PORT, () => {
   startPeriodicHealthPing();
+  startWcMonitor();
   console.log(`[QBWC] Listening http://localhost:${PORT}${BASE_PATH}`);
 });

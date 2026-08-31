@@ -469,54 +469,51 @@ router.post('/webhooks/orders/paid', rawJson, async (req, res) => {
 // ===================================================
 //  B) inventory_levels/update (ajustes manuales/restock)
 // ===================================================
+// Desactivado por defecto: reflejar en QBD los ajustes positivos de inventario
+// hechos en Shopify puede duplicar movimientos frente a /orders/paid.
+// Actívalo deliberadamente con SHOPIFY_INV_LEVEL_TO_QBD=true.
 router.post('/webhooks/inventory_levels/update', rawJson, async (req, res) => {
   try {
-    const ev = req.body;
+    if (!verifyHmac(process.env.SHOPIFY_WEBHOOK_SECRET, req.body, req.get('X-Shopify-Hmac-Sha256'))) {
+      return res.status(401).send('Invalid HMAC');
+    }
 
-    // Derivar delta de forma robusta
+    if (!/^(1|true|yes)$/i.test(String(process.env.SHOPIFY_INV_LEVEL_TO_QBD || '').trim())) {
+      return res.status(200).send('disabled');
+    }
+
+    const ev = JSON.parse(req.body.toString('utf8'));
+
     const before = Number(
-      ev?.previous_quantity ??
-      ev?.inventory_level?.available_before ??
-      ev?.available_before
+      ev?.previous_quantity ?? ev?.inventory_level?.available_before ?? ev?.available_before
     );
-    const after = Number(
-      ev?.available ??
-      ev?.inventory_level?.available
-    );
-    let delta = Number.isFinite(after) && Number.isFinite(before)
-      ? (after - before)
+    const after = Number(ev?.available ?? ev?.inventory_level?.available);
+    const delta = Number.isFinite(after) && Number.isFinite(before)
+      ? after - before
       : Number(ev?.available_adjustment ?? 0);
 
-    // Si no hay delta discernible, no hacemos nada
-    if (!Number.isFinite(delta) || delta === 0) {
-      return res.status(200).send('noop');
+    if (!Number.isFinite(delta) || delta === 0) return res.status(200).send('noop');
+    // Ventas (delta < 0): ya se facturan en /orders/paid.
+    if (delta < 0) return res.status(200).send('ignored-sale-delta');
+
+    // inventory_item_id -> SKU (Shopify) -> ítem QBD
+    let sku = null;
+    try { sku = await getInventoryItemSku(ev?.inventory_item_id); } catch (e) {
+      console.warn('inventory_levels/update: getInventoryItemSku failed', e?.message || e);
     }
+    if (!sku) return res.status(200).send('no-sku');
 
-    // VENTAS (delta < 0): se facturan en /orders/paid → NO inventario aquí
-    if (delta < 0) {
-      return res.status(200).send('ignored-sale-delta');
-    }
-
-    // REABASTECIMIENTOS / CORRECCIONES POSITIVAS (delta > 0): encola ajuste si quieres reflejarlo
-    // Mapea inventory_item_id → QBD Item (ListID o FullName)
-    const listId = (typeof mapToQbdListID === 'function')
-      ? mapToQbdListID(ev?.inventory_item_id)
-      : null;
-
-    if (!listId) {
-      // Si no puedes mapear, registra y evita enviar un ajuste inválido
-      console.warn('inventory_levels/update: no mapping for inventory_item_id', ev?.inventory_item_id);
+    const inv = loadInventory();
+    const searchItems = Array.isArray(inv.allItems) ? inv.allItems : inv.items || [];
+    const item = resolveSkuToItem(searchItems, sku, skuFields());
+    if (!item || !item.ListID) {
+      console.warn('inventory_levels/update: no QBD item for sku', sku);
       return res.status(200).send('no-mapping');
     }
 
     await enqueueJob({
       type: 'inventoryAdjust',
-      lines: [
-        {
-          ListID: listId,
-          QuantityDifference: Math.abs(delta),  // delta > 0
-        },
-      ],
+      lines: [{ ListID: item.ListID, QuantityDifference: Math.abs(delta) }],
       account: process.env.QBD_ADJUST_ACCOUNT || 'Inventory Adjustment',
       source: 'shopify-inventory-level',
       createdAt: new Date().toISOString(),
