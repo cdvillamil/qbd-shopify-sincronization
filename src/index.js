@@ -23,6 +23,7 @@ const {
   getCurrentJob,
   clearCurrentJob,
   LOG_DIR,
+  DEBUG_DIR,
   ensureDir: ensureLogDir,
   pruneLogFiles,
 } = require('./services/jobQueue');
@@ -35,8 +36,8 @@ const BASE_PATH = process.env.BASE_PATH || '/qbwc';
 const LAST_ERROR_FILE = 'last-error.txt';
 const TNS       = 'http://developer.intuit.com/';
 
-const LAST_RESPONSE_KEEP = Math.max(1, Number(process.env.LAST_RESPONSE_KEEP || 1440));
-const LAST_RESPONSE_MAX_AGE_HOURS = Number(process.env.LAST_RESPONSE_MAX_AGE_HOURS || 48);
+const LAST_RESPONSE_KEEP = Math.max(1, Number(process.env.LAST_RESPONSE_KEEP || 200));
+const LAST_RESPONSE_MAX_AGE_HOURS = Number(process.env.LAST_RESPONSE_MAX_AGE_HOURS || 24);
 const LAST_RESPONSE_MAX_AGE_MS = LAST_RESPONSE_MAX_AGE_HOURS > 0
   ? LAST_RESPONSE_MAX_AGE_HOURS * 60 * 60 * 1000
   : 0;
@@ -121,6 +122,7 @@ function pruneLastResponses() {
     pruneLogFiles(LAST_RESPONSE_PATTERN, {
       keep: LAST_RESPONSE_KEEP,
       maxAgeMs: LAST_RESPONSE_MAX_AGE_MS,
+      dir: DEBUG_DIR,
     });
   } catch (err) {
     if (process.env.DEBUG_LOG_RETENTION) {
@@ -130,8 +132,11 @@ function pruneLastResponses() {
 }
 
 function fp(n){ return path.join(LOG_DIR,n); }
+function fpd(n){ return path.join(DEBUG_DIR,n); }
 function readText(f){ return fs.existsSync(f) ? fs.readFileSync(f,'utf8') : null; }
 function save(name, txt){ ensureLogDir(); fs.writeFileSync(fp(name), txt??'', 'utf8'); }
+// Dumps voluminosos / desechables (XML crudos). Van a DEBUG_DIR (por defecto /tmp).
+function saveDebug(name, txt){ ensureLogDir(DEBUG_DIR); fs.writeFileSync(fpd(name), txt??'', 'utf8'); }
 function readJsonSafe(name){
   const target = fp(name);
   try {
@@ -318,27 +323,33 @@ app.get('/debug/config', (_req,res)=>res.json({
   user:process.env.WC_USERNAME||null,
   passLen:(process.env.WC_PASSWORD||'').length,
   companyFile:process.env.WC_COMPANY_FILE||'none',
-  basePath:BASE_PATH, logDir:LOG_DIR
+  basePath:BASE_PATH, logDir:LOG_DIR, debugDir:DEBUG_DIR
 }));
 app.get('/debug/where', (_req,res)=>{
   try{
     ensureLogDir();
-    const files = fs.readdirSync(LOG_DIR).map(n=>{
-      const st=fs.statSync(fp(n)); return {name:n,size:st.size,mtime:st.mtime};
-    });
-    res.json({logDir:LOG_DIR, files});
+    const listDir = (dir)=>{
+      try {
+        return fs.readdirSync(dir).map(n=>{
+          const st=fs.statSync(path.join(dir,n)); return {name:n,size:st.size,mtime:st.mtime};
+        });
+      } catch { return []; }
+    };
+    const out = { logDir:LOG_DIR, files:listDir(LOG_DIR) };
+    if (DEBUG_DIR !== LOG_DIR) { out.debugDir = DEBUG_DIR; out.debugFiles = listDir(DEBUG_DIR); }
+    res.json(out);
   }catch(e){ res.status(500).send(String(e)); }
 });
 
-/* Endpoints de depuración existentes */
-app.get('/debug/last-post-body', (req,res)=>sendFileSmart(res, fp('last-post-body.xml')));
-app.get('/debug/last-auth-request', (req,res)=>sendFileSmart(res, fp('last-auth-request.xml')));
-app.get('/debug/last-auth-response',(req,res)=>sendFileSmart(res, fp('last-auth-response.xml')));
+/* Endpoints de depuración existentes (dumps en DEBUG_DIR) */
+app.get('/debug/last-post-body', (req,res)=>sendFileSmart(res, fpd('last-post-body.xml')));
+app.get('/debug/last-auth-request', (req,res)=>sendFileSmart(res, fpd('last-auth-request.xml')));
+app.get('/debug/last-auth-response',(req,res)=>sendFileSmart(res, fpd('last-auth-response.xml')));
 app.get('/debug/last-auth-cred', (req,res)=>{
-  const p=fp('last-auth-cred.json'); if(!fs.existsSync(p)) return res.status(404).send('no auth cred yet');
+  const p=fpd('last-auth-cred.json'); if(!fs.existsSync(p)) return res.status(404).send('no auth cred yet');
   res.type('application/json').send(fs.readFileSync(p,'utf8'));
 });
-app.get('/debug/last-response', (req, res) => sendFileSmart(res, fp('last-response.xml')));
+app.get('/debug/last-response', (req, res) => sendFileSmart(res, fpd('last-response.xml')));
 
 /* Nueva cola: ver y sembrar */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
@@ -404,7 +415,7 @@ app.post(BASE_PATH, (req,res)=>{
   req.on('data', c=>{ raw+=c; });
   req.on('end', async () => {
     try{
-      save('last-post-body.xml', raw);
+      saveDebug('last-post-body.xml', raw);
 
       const is = (tag)=> raw.includes(`<${tag}`) || raw.includes(`<tns:${tag}`);
 
@@ -424,7 +435,7 @@ app.post(BASE_PATH, (req,res)=>{
         bodyXml = `<clientVersionResponse xmlns="${TNS}"><clientVersionResult></clientVersionResult></clientVersionResponse>`;
       }
       else if (is('authenticate')) {
-        save('last-auth-request.xml', raw);
+        saveDebug('last-auth-request.xml', raw);
         const {user,pass} = extractCredsFromXml(raw);
         const envUser = process.env.WC_USERNAME || '';
         const envPass = process.env.WC_PASSWORD || '';
@@ -442,7 +453,7 @@ app.post(BASE_PATH, (req,res)=>{
 
         const passSha = crypto.createHash('sha256').update(pass||'', 'utf8').digest('hex');
         const envSha  = crypto.createHash('sha256').update(envPass, 'utf8').digest('hex');
-        save('last-auth-cred.json', JSON.stringify({
+        saveDebug('last-auth-cred.json', JSON.stringify({
           ts:new Date().toISOString(),
           receivedUser:user, receivedPassLen:(pass||'').length, receivedPassSha256:passSha,
           envUser, envPassLen:envPass.length, envPassSha256:envSha,
@@ -473,7 +484,7 @@ app.post(BASE_PATH, (req,res)=>{
           `</authenticateResponse>`;
 
         const envlp = envelope(bodyXml);
-        save('last-auth-response.xml', envlp);
+        saveDebug('last-auth-response.xml', envlp);
         res.type('text/xml').status(200).send(envlp);
         return;
 
@@ -492,7 +503,7 @@ app.post(BASE_PATH, (req,res)=>{
         if (job && qbxml) {
           setCurrentJob(job);
           await popJob();
-          save('last-request-qbxml.xml', qbxml);
+          saveDebug('last-request-qbxml.xml', qbxml);
           console.log('[qbwc] sendRequestXML QBXML payload:', qbxml);
           bodyXml = `<sendRequestXMLResponse xmlns="${TNS}"><sendRequestXMLResult>${qbxml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</sendRequestXMLResult></sendRequestXMLResponse>`;
         } else {
@@ -504,8 +515,8 @@ app.post(BASE_PATH, (req,res)=>{
       else if (is('receiveResponseXML')) {
         const resp = extract(raw, 'response');
         const now  = Date.now();
-        save(`last-response-${now}.xml`, resp);
-        save('last-response.xml', resp);
+        saveDebug(`last-response-${now}.xml`, resp);
+        saveDebug('last-response.xml', resp);
         // Limpia snapshots antiguos en cada corrida del Web Connector
         pruneLastResponses();
         //console.log('[qbwc] receiveResponseXML QBXML payload:', resp);

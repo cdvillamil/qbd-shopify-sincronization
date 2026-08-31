@@ -4,10 +4,12 @@ const path = require('path');
 const express = require('express');
 const router = express.Router();
 
-const { LOG_DIR, ensureDir: ensureLogDir } = require('../services/jobQueue');
+const { LOG_DIR, DEBUG_DIR, ensureDir: ensureLogDir } = require('../services/jobQueue');
 
 const SNAP_PATH = path.join(LOG_DIR, 'last-inventory.json');
-const LAST_RESP = path.join(LOG_DIR, 'last-response.xml');
+// Los dumps XML crudos viven en DEBUG_DIR (por defecto /tmp).
+const XML_DIR = DEBUG_DIR;
+const LAST_RESP = path.join(XML_DIR, 'last-response.xml');
 
 // ---------- utils ----------
 function read(file) {
@@ -57,14 +59,14 @@ function parseInventory(xml) {
   return items;
 }
 
-// Devuelve el último XML en LOG_DIR que contenga inventario
+// Devuelve el último XML en XML_DIR que contenga inventario
 function pickLatestInventoryXml() {
   let files = [];
   try {
-    ensureLogDir();
-    files = fs.readdirSync(LOG_DIR)
+    ensureLogDir(XML_DIR);
+    files = fs.readdirSync(XML_DIR)
       .filter(n => n.endsWith('.xml'))
-      .map(n => path.join(LOG_DIR, n))
+      .map(n => path.join(XML_DIR, n))
       .sort((a, b) => {
         try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
       });
@@ -91,14 +93,14 @@ function pickLatestInventoryXml() {
 
 // ---------- routes ----------
 
-// Lista lo que hay en LOG_DIR y cuenta ítems por XML
+// Lista los XML de XML_DIR y cuenta ítems por archivo
 router.get('/scan-xml', (_req, res) => {
   let out = [];
   try {
-    ensureLogDir();
-    const files = fs.readdirSync(LOG_DIR)
+    ensureLogDir(XML_DIR);
+    const files = fs.readdirSync(XML_DIR)
       .filter(n => n.endsWith('.xml'))
-      .map(n => path.join(LOG_DIR, n))
+      .map(n => path.join(XML_DIR, n))
       .sort((a, b) => {
         try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
       });

@@ -2,8 +2,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const TMP_DIR = '/tmp';
-const OVERRIDES_PATH = path.join(TMP_DIR, 'sku-overrides.json');
+// Overrides manuales: se guardan en LOG_DIR (persistente) para que sobrevivan
+// reinicios. SKU_OVERRIDES_PATH permite forzar otra ruta.
+const OVERRIDES_PATH =
+  process.env.SKU_OVERRIDES_PATH ||
+  path.join(process.env.LOG_DIR || '/tmp', 'sku-overrides.json');
 
 function loadOverrides() {
   try {
