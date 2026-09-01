@@ -57,6 +57,19 @@ function recipients(to) {
     .map(address => ({ emailAddress: { address } }));
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms || 0)));
+
+// fetch con timeout (AbortController) para que una llamada colgada falle rápido.
+async function fetchWithTimeout(url, opts, timeoutMs = 15000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    return await _fetch(url, { ...opts, signal: ctl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /* ================= Microsoft Graph ================= */
 let _token = { value: null, exp: 0 };
 
@@ -70,11 +83,15 @@ async function graphToken(cfg) {
     scope: 'https://graph.microsoft.com/.default',
     grant_type: 'client_credentials',
   });
-  const r = await _fetch(`https://login.microsoftonline.com/${cfg.tenant}/oauth2/v2.0/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
+  const r = await fetchWithTimeout(
+    `https://login.microsoftonline.com/${cfg.tenant}/oauth2/v2.0/token`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    },
+    15000
+  );
   const json = await r.json().catch(() => ({}));
   if (!r.ok || !json.access_token) {
     throw new Error(`token ${r.status}: ${JSON.stringify(json.error || json)}`);
@@ -83,8 +100,10 @@ async function graphToken(cfg) {
   return _token.value;
 }
 
+// Graph / Exchange Online devuelve 5xx transitorios con frecuencia
+// (Keyset does not exist, Concurrency Limit Reached, 504...). Reintentamos
+// unas pocas veces antes de rendirnos en este ciclo.
 async function sendViaGraph(cfg, { subject, text }) {
-  const token = await graphToken(cfg);
   const payload = {
     message: {
       subject,
@@ -93,17 +112,35 @@ async function sendViaGraph(cfg, { subject, text }) {
     },
     saveToSentItems: false,
   };
-  const r = await _fetch(
-    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.sender)}/sendMail`,
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+
+  let lastErr;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const token = await graphToken(cfg);
+      const r = await fetchWithTimeout(
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(cfg.sender)}/sendMail`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        15000
+      );
+      if (r.status === 202) return true;
+
+      const errText = await r.text().catch(() => '');
+      lastErr = new Error(`sendMail ${r.status}: ${errText.slice(0, 300)}`);
+      // 4xx (salvo 429) = error permanente, no reintentar.
+      if (r.status < 500 && r.status !== 429) throw lastErr;
+    } catch (err) {
+      lastErr = err;
+      if (err && /sendMail 4\d\d/.test(String(err.message)) && !/sendMail 429/.test(String(err.message))) {
+        throw err;
+      }
     }
-  );
-  if (r.status === 202) return true;
-  const errText = await r.text().catch(() => '');
-  throw new Error(`sendMail ${r.status}: ${errText.slice(0, 400)}`);
+    if (attempt < 4) await sleep(1500 * attempt);
+  }
+  throw lastErr;
 }
 
 /* ================= SMTP ================= */
