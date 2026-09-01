@@ -17,6 +17,7 @@ const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
 const {
   readJobs,
   enqueueJob,
+  withJobsLock,
   peekJob,
   popJob,
   setCurrentJob,
@@ -490,6 +491,22 @@ app.post(BASE_PATH, (req,res)=>{
 
       }
       else if (is('sendRequestXML')) {
+        // If a previous session left a currentJob orphan (sendRequestXML was called but
+        // receiveResponseXML never arrived — e.g. QBD closed mid-session), put that job
+        // back at the front of the queue before picking the next one. Without this, a
+        // successful session after a crash would call clearCurrentJob() and silently
+        // discard the orphaned job forever.
+        const orphanedJob = getCurrentJob();
+        if (orphanedJob) {
+          try {
+            await withJobsLock(async (jobs) => { jobs.unshift(orphanedJob); });
+            console.warn('[qbwc] sendRequestXML: orphaned currentJob re-queued at front', { type: orphanedJob.type, ts: orphanedJob.ts });
+          } catch (reQueueErr) {
+            console.error('[qbwc] sendRequestXML: failed to re-queue orphaned currentJob', reQueueErr);
+          }
+          clearCurrentJob();
+        }
+
         // ¿Hay trabajo en cola?
         let job = peekJob();
         let qbxml = '';
@@ -673,6 +690,24 @@ app.post(BASE_PATH, (req,res)=>{
         const hresult = extract(raw, 'hresult') || '';
         const message = extract(raw, 'message') || '';
         console.error('WC connectionError:', hresult, message);
+
+        // If a job was already popped from the queue and set as currentJob in a
+        // previous sendRequestXML call, QBD closing means receiveResponseXML will
+        // never arrive. Re-queue the orphaned job at the front so it is retried
+        // once QBD is open again, rather than being silently lost.
+        const orphaned = getCurrentJob();
+        if (orphaned) {
+          try {
+            await withJobsLock(async (jobs) => { jobs.unshift(orphaned); });
+            console.warn('[qbwc] connectionError: re-queued orphaned job to front of queue', { type: orphaned.type, ts: orphaned.ts });
+          } catch (reQueueErr) {
+            console.error('[qbwc] connectionError: failed to re-queue orphaned job', reQueueErr);
+          }
+          clearCurrentJob();
+        }
+
+        const errorText = `connectionError ${hresult}: ${message}`;
+        persistLastError(errorText);
         bodyXml = `<connectionErrorResponse xmlns="${TNS}"><connectionErrorResult>DONE</connectionErrorResult></connectionErrorResponse>`;
       }
 
