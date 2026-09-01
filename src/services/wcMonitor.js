@@ -76,14 +76,17 @@ async function checkOnce(now = Date.now()) {
   const threshold = DOWN_MINUTES * 60000;
 
   if (downForMs >= threshold) {
-    const firstAlert = state.status !== 'down';
-    const lastAlert = Date.parse(state.lastAlertAt || '') || 0;
-    const dueRepeat = lastAlert && now - lastAlert >= REPEAT_MINUTES * 60000;
-    if (!firstAlert && !dueRepeat) return;
-
     const sinceIso = new Date(seen).toISOString();
-    const n = (firstAlert ? 0 : (state.alertCount || 0)) + 1;
-    await sendMail({
+    // "Ya avisado" = estamos en down Y algún correo salió de verdad.
+    const alreadyAlerted = state.status === 'down' && Boolean(state.lastAlertAt);
+    const lastAlert = Date.parse(state.lastAlertAt || '') || 0;
+    const dueRepeat = alreadyAlerted && now - lastAlert >= REPEAT_MINUTES * 60000;
+
+    // Enviar si: aún no hemos logrado avisar de esta caída, o toca la repetición.
+    if (alreadyAlerted && !dueRepeat) return;
+
+    const n = (state.alertCount || 0) + 1;
+    const sent = await sendMail({
       subject: `[QBD-Shopify] Web Connector sin responder hace ${fmtDuration(downForMs)}`,
       text:
 `El QuickBooks Web Connector no realiza una consulta desde hace ${fmtDuration(downForMs)}.
@@ -94,11 +97,15 @@ Accion: abrir el Web Connector en la VM de QuickBooks y ejecutar / reanudar la t
 
 (Aviso ${n}. Se repite cada ${REPEAT_MINUTES} min mientras siga caido.)`,
     });
+
     writeJson(ALERT_PATH, {
       status: 'down',
-      downSince: firstAlert ? sinceIso : (state.downSince || sinceIso),
-      lastAlertAt: new Date(now).toISOString(),
-      alertCount: n,
+      downSince: state.downSince || sinceIso,
+      // Solo avanzamos el reloj de reintento si el correo salió. Si falló,
+      // se reintenta en el próximo ciclo (~5 min) en vez de esperar 1 h.
+      lastAlertAt: sent ? new Date(now).toISOString() : (state.lastAlertAt || null),
+      alertCount: sent ? n : (state.alertCount || 0),
+      lastSendError: sent ? null : new Date(now).toISOString(),
     });
     return;
   }
