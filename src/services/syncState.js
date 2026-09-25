@@ -151,7 +151,11 @@ function selectItemsToSync(allItems, { now = Date.now() } = {}) {
     };
   }
 
-  const picked = [];
+  // Los cambios reales de cantidad van primero; los reintentos de unmatched/error
+  // (que tras una reconciliación pueden ser miles) solo llenan el cupo restante,
+  // para que nunca retrasen un cambio de QBD más allá de MAX_SYNC_PER_RUN.
+  const changed = [];
+  const retries = [];
   for (const item of items) {
     const key = keyForItem(item);
     if (!key) continue;
@@ -160,21 +164,26 @@ function selectItemsToSync(allItems, { now = Date.now() } = {}) {
 
     const entry = state.byKey[key];
     if (!entry) {
-      picked.push(item); // ítem nuevo que no estaba en el seed
+      changed.push(item); // ítem nuevo que no estaba en el seed
       continue;
     }
 
     if (entry.status === 'ok' || entry.status === 'seed') {
-      if (entry.shopifyQty !== q) picked.push(item);
+      if (entry.shopifyQty !== q) changed.push(item);
       continue;
     }
 
     // unmatched / error -> reintentar si cambió la cantidad o venció el backoff
+    if (entry.qbdQty !== q) {
+      changed.push(item);
+      continue;
+    }
     const wait = entry.status === 'unmatched' ? UNMATCHED_RETRY_MS : ERROR_RETRY_MS;
     const last = Date.parse(entry.lastAttemptAt || '') || 0;
-    if (entry.qbdQty !== q || now - last >= wait) picked.push(item);
+    if (now - last >= wait) retries.push(item);
   }
 
+  const picked = changed.concat(retries);
   const capped = picked.length > MAX_SYNC_PER_RUN;
   return {
     toSync: capped ? picked.slice(0, MAX_SYNC_PER_RUN) : picked,

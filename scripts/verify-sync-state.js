@@ -75,6 +75,18 @@ setTimeout(() => {
   const s2 = selectItemsToSync(big.map(it => ({ ...it, QuantityOnHand: it.QuantityOnHand + 1 })));
   assert(s2.capped === true && s2.toSync.length === 3, `tope respeta SYNC_MAX_PER_RUN (${s2.toSync.length})`);
 
+  // 7) Los cambios reales van antes que los reintentos de unmatched, aunque estén
+  //    más atrás en el catálogo (caso: miles de unmatched tras una reconciliación).
+  resetState();
+  selectItemsToSync(big);                       // seed
+  const old = new Date(Date.now() - 60_000).toISOString();
+  recordResults(big.slice(0, 5).map(it => ({ listId: it.ListID, sku: it.Name, target: it.QuantityOnHand, ok: false, error: 'NO_MATCH' })));
+  const st = readState();
+  for (const k of ['X0', 'X1', 'X2', 'X3', 'X4']) st.byKey[k].lastAttemptAt = old; // backoff vencido
+  require('../src/services/syncState').writeState(st);
+  const s3 = selectItemsToSync(big.map(it => (it.ListID === 'X19' ? { ...it, QuantityOnHand: 99 } : it)));
+  assert(s3.toSync[0] && s3.toSync[0].ListID === 'X19', `el cambio real (X19) va primero pese a 5 unmatched vencidos (${s3.toSync.map(i => i.ListID)})`);
+
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   console.log(failures === 0 ? '\nOK - todo verde' : `\n${failures} fallo(s)`);
   process.exit(failures === 0 ? 0 : 1);
