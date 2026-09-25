@@ -385,6 +385,16 @@ app.post('/debug/sync-state/reset', (req,res)=>{
   } catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
 });
 
+// Lock del sync QBD -> Shopify. Se libera solo si es huérfano (> SHOPIFY_SYNC_LOCK_STALE_MS).
+app.get('/debug/sync-lock', (_req,res)=>{
+  try { res.json(require('./services/shopify.sync').getLockStatus()); }
+  catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
+app.post('/debug/sync-lock/release', (_req,res)=>{
+  try { res.json({ ok:true, ...require('./services/shopify.sync').forceReleaseLock() }); }
+  catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
+
 // Comparación en vivo QBD vs Shopify (presencia de SKU). Revela los NO_MATCH.
 app.get('/debug/drift', async (req,res)=>{
   try {

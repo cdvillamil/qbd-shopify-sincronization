@@ -267,9 +267,86 @@ function saveLastPush(plan) {
   return payload;
 }
 
+// Un lock se considera huérfano si el proceso que lo tomó murió (reinicio o
+// redeploy de App Service a mitad de un sync). Como LOG_DIR vive en /home y
+// persiste, sin esto el lock bloquearía todos los syncs para siempre.
+const LOCK_STALE_MS = (() => {
+  const n = Number(process.env.SHOPIFY_SYNC_LOCK_STALE_MS);
+  return Number.isFinite(n) && n > 0 ? n : 30 * 60 * 1000; // 30 min
+})();
+
+function readLockInfo() {
+  try {
+    return JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === 'EPERM';
+  }
+}
+
+// Devuelve el motivo por el que el lock es huérfano, o null si sigue vigente.
+function lockStaleReason(info, now = Date.now()) {
+  let acquiredMs = Date.parse(info?.acquiredAt || '');
+  if (!Number.isFinite(acquiredMs)) {
+    try { acquiredMs = fs.statSync(LOCK_PATH).mtimeMs; } catch (_) { return null; }
+  }
+  if (now - acquiredMs >= LOCK_STALE_MS) return 'expired';
+  const pid = Number(info?.pid);
+  if (info?.hostname === os.hostname() && Number.isInteger(pid) && pid > 0
+    && pid !== process.pid && !pidAlive(pid)) {
+    return 'dead-pid';
+  }
+  return null;
+}
+
+// Borra el lock si es huérfano. Devuelve true si lo borró.
+function clearStaleLock() {
+  if (!fs.existsSync(LOCK_PATH)) return false;
+  const info = readLockInfo();
+  const reason = lockStaleReason(info);
+  if (!reason) return false;
+  try {
+    fs.unlinkSync(LOCK_PATH);
+    console.warn('[sync] stale lock removed', { reason, lock: info, staleAfterMs: LOCK_STALE_MS });
+    return true;
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return true;
+    console.error('[sync] stale lock removal failed:', err?.message || err);
+    return false;
+  }
+}
+
+function getLockStatus() {
+  if (!fs.existsSync(LOCK_PATH)) return { locked: false, staleAfterMs: LOCK_STALE_MS };
+  const info = readLockInfo();
+  return { locked: true, lock: info, stale: lockStaleReason(info), staleAfterMs: LOCK_STALE_MS };
+}
+
+// Liberación manual (POST /debug/sync-lock/release).
+function forceReleaseLock() {
+  const info = fs.existsSync(LOCK_PATH) ? readLockInfo() : null;
+  try {
+    fs.unlinkSync(LOCK_PATH);
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { released: false, lock: null };
+    throw err;
+  }
+  console.warn('[sync] lock force-released', { lock: info });
+  return { released: true, lock: info };
+}
+
 function isSyncLocked() {
   try {
-    return fs.existsSync(LOCK_PATH);
+    if (!fs.existsSync(LOCK_PATH)) return false;
+    return !clearStaleLock();
   } catch (err) {
     if (DEBUG) {
       console.warn('[sync] lock check error:', err?.message || err);
@@ -280,6 +357,7 @@ function isSyncLocked() {
 
 function acquireLock() {
   ensureLogDir();
+  clearStaleLock();
   const lockMeta = {
     pid: process.pid,
     hostname: os.hostname(),
@@ -291,13 +369,7 @@ function acquireLock() {
     dbg('sync lock acquired', { path: LOCK_PATH });
   } catch (err) {
     if (err && err.code === 'EEXIST') {
-      let info = null;
-      try { info = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')); }
-      catch (readErr) {
-        if (DEBUG) {
-          console.warn('[sync] lock read error:', readErr?.message || readErr);
-        }
-      }
+      const info = readLockInfo();
       const e = new Error('Shopify sync already running.');
       e.code = LOCK_ERROR_CODE;
       if (info) e.lock = info;
@@ -868,6 +940,8 @@ module.exports = {
   readReconcileStatus,
   isReconcileEnabled,
   isSyncLocked,
+  getLockStatus,
+  forceReleaseLock,
   findVariantBySkuGQL,
   shopifyGraphQL,
   LOCK_ERROR_CODE,
