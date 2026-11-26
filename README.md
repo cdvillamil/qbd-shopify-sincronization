@@ -78,6 +78,11 @@ Las variables mínimas para un entorno productivo son:
 - `GET /healthz` — Comprobación rápida del servicio.【F:src/index.js†L339-L343】
 - `GET /debug/config` — Muestra valores efectivos (sin contraseñas) y directorio de logs.【F:src/index.js†L333-L342】
 - `GET /debug/queue` — Revisa los trabajos pendientes en la cola.【F:src/index.js†L360-L372】
+- `GET /debug/queue/summary` — Conteo de la cola por tipo de trabajo.
+- `POST /debug/queue/compact[?dryRun=1]` — Deja un solo `inventoryQuery` (al final) y conserva facturas, recibos y notas crédito en su orden. Úsalo si el Web Connector estuvo detenido y la cola acumuló consultas de inventario.
+- `GET /debug/failed-jobs` — Documentos que QuickBooks rechazó (`failed`) o cuyo resultado no se confirmó porque el ciclo se cortó (`unconfirmed`). Se avisa por correo si está configurado.
+- `POST /debug/failed-jobs/retry?id=<id>[,<id>]` (o `?all=1`) — Reencola tras corregir la causa. En los `unconfirmed`, verifica antes en QBD que el documento no exista, o se duplicará.
+- `POST /debug/failed-jobs/dismiss?id=<id>[,<id>]` — Quita del registro (p. ej. si se creó a mano en QBD).
 - `GET /debug/inventory` — Devuelve el último snapshot procesado desde QBD.【F:src/index.js†L373-L380】
 - `GET /debug/last-request-qbxml.xml` y `GET /debug/last-response.xml` — Últimos mensajes QBXML enviados/recibidos.【F:src/index.js†L382-L455】
 
