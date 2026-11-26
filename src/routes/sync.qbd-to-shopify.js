@@ -44,7 +44,11 @@ router.post('/qbd-to-shopify/apply', async (req, res) => {
 
 // Reconciliación completa QBD vs Shopify (por cantidad).
 router.get('/reconcile/status', (_req, res) => {
-  res.json({ enabled: isReconcileEnabled(), status: readReconcileStatus() || null });
+  const at = String(process.env.SHOPIFY_RECONCILE_AT || '').trim();
+  const schedule = at
+    ? { mode: 'daily', at, tz: process.env.SHOPIFY_RECONCILE_TZ || 'UTC' }
+    : { mode: 'interval', intervalMs: Number(process.env.SHOPIFY_RECONCILE_INTERVAL_MS) || 6 * 60 * 60 * 1000 };
+  res.json({ enabled: isReconcileEnabled(), schedule, status: readReconcileStatus() || null });
 });
 
 // POST /sync/reconcile            -> corrige diferencias en segundo plano (202)

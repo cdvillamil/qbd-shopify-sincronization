@@ -912,15 +912,73 @@ async function runReconcile(opts = {}) {
 }
 
 // Corre la reconciliación si está habilitada y venció el intervalo. No lanza.
+// Horas fijas del día para la reconciliación automática.
+//   SHOPIFY_RECONCILE_AT="00:30"         (una vez al día)
+//   SHOPIFY_RECONCILE_AT="00:30,13:00"   (varias)
+//   SHOPIFY_RECONCILE_TZ="America/Bogota" (zona horaria IANA; por defecto UTC)
+// Si está definida, reemplaza a SHOPIFY_RECONCILE_INTERVAL_MS.
+function reconcileTimes() {
+  return String(process.env.SHOPIFY_RECONCILE_AT || '')
+    .split(',')
+    .map((t) => t.trim())
+    .map((t) => {
+      const m = t.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const h = Number(m[1]);
+      const min = Number(m[2]);
+      return h < 24 && min < 60 ? { h, min } : null;
+    })
+    .filter(Boolean);
+}
+function reconcileTz() {
+  const tz = String(process.env.SHOPIFY_RECONCILE_TZ || 'UTC').trim() || 'UTC';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; }
+  catch (_) { console.warn('[sync] SHOPIFY_RECONCILE_TZ inválida, se usa UTC:', tz); return 'UTC'; }
+}
+
+// Instante (ms) de la hora programada más reciente que ya pasó (dentro de 24 h).
+function lastScheduledSlot(now, times, tz) {
+  if (!times.length) return null;
+  const parts = {};
+  for (const p of new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(now))) parts[p.type] = Number(p.value);
+  // Diferencia entre la hora local de la zona y UTC en este momento.
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  const offset = asUtc - Math.floor(now / 1000) * 1000;
+  let best = null;
+  for (const { h, min } of times) {
+    let slot = Date.UTC(parts.year, parts.month - 1, parts.day, h, min) - offset;
+    if (slot > now) slot -= 24 * 60 * 60 * 1000;
+    if (best == null || slot > best) best = slot;
+  }
+  return best;
+}
+
+// Decide si toca correr. Con horas fijas: si no hay una corrida completada
+// que haya empezado después de la última hora programada. Si el Web Connector
+// no estaba corriendo a esa hora, se ejecuta en el primer poll posterior.
+function isReconcileDue(last, now = Date.now()) {
+  const lastAt = Date.parse(last?.finishedAt || '') || 0;
+  if (last?.status === 'running') return false;
+  // Tras un fallo real, espera 20 min antes de reintentar (evita loops).
+  if (last?.status === 'failed' && lastAt && now - lastAt < 20 * 60 * 1000) return false;
+
+  const times = reconcileTimes();
+  if (times.length) {
+    const slot = lastScheduledSlot(now, times, reconcileTz());
+    const lastStart = last?.status === 'completed' && !last?.dryRun ? (Date.parse(last.startedAt || '') || 0) : 0;
+    return lastStart < slot;
+  }
+  if (last?.status === 'completed' && lastAt && now - lastAt < reconcileIntervalMs()) return false;
+  return true;
+}
+
 async function runReconcileIfDue() {
   if (!isReconcileEnabled()) return null;
   try {
-    const last = readReconcileStatus();
-    const lastAt = Date.parse(last?.finishedAt || '') || 0;
-    if (last?.status === 'running') return null;
-    if (last?.status === 'completed' && lastAt && Date.now() - lastAt < reconcileIntervalMs()) return null;
-    // Tras un fallo real, espera 20 min antes de reintentar (evita loops).
-    if (last?.status === 'failed' && lastAt && Date.now() - lastAt < 20 * 60 * 1000) return null;
+    if (!isReconcileDue(readReconcileStatus())) return null;
     if (isSyncLocked()) return null;
     return await runReconcile();
   } catch (err) {
@@ -937,6 +995,8 @@ module.exports = {
   computeDrift,
   runReconcile,
   runReconcileIfDue,
+  isReconcileDue,
+  lastScheduledSlot,
   readReconcileStatus,
   isReconcileEnabled,
   isSyncLocked,
