@@ -17,6 +17,9 @@ const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
 const {
   readJobs,
   enqueueJob,
+  enqueueUnlessPending,
+  compactInventoryQueries,
+  countByType,
   peekJob,
   popJob,
   setCurrentJob,
@@ -353,6 +356,19 @@ app.get('/debug/last-response', (req, res) => sendFileSmart(res, fpd('last-respo
 
 /* Nueva cola: ver y sembrar */
 app.get('/debug/queue', (_req,res)=>res.json(readJobs()));
+// Conteo por tipo (la cola completa puede tener miles de jobs).
+app.get('/debug/queue/summary', (_req,res)=>{
+  const jobs = readJobs();
+  res.json({ total: jobs.length, byType: countByType(jobs), next: jobs[0] || null });
+});
+// Deja un solo inventoryQuery al final y conserva pedidos/ajustes en orden.
+// POST /debug/queue/compact?dryRun=1 solo muestra el resultado.
+app.post('/debug/queue/compact', async (req,res)=>{
+  try {
+    const dryRun = /^(1|true|yes)$/i.test(String(req.query.dryRun || ''));
+    res.json({ ok:true, ...(await compactInventoryQueries({ dryRun })) });
+  } catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
 app.get('/debug/seed-inventory', async (req,res)=>{
   const job = { type:'inventoryQuery', ts:new Date().toISOString() };
   const rawMax = req.query.max;
@@ -452,11 +468,11 @@ app.post(BASE_PATH, (req,res)=>{
         const ok = (user===envUser && pass===envPass);
 
         // justo después de calcular ok=true en authenticate:
-        if (ok && process.env.AUTO_SEED_ON_AUTH === 'true') {
-          await enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
-        }
-        if (process.env.AUTO_ENQUEUE_INVENTORY_QUERY === 'true') {
-          await enqueue({ type: 'inventoryQuery', ts: new Date().toISOString() });
+        // Un solo inventoryQuery pendiente a la vez: si la cola está detenida,
+        // cada authenticate apilaría otra consulta de catálogo completo.
+        if (ok && (process.env.AUTO_SEED_ON_AUTH === 'true' || process.env.AUTO_ENQUEUE_INVENTORY_QUERY === 'true')) {
+          const r = await enqueueUnlessPending({ type: 'inventoryQuery', ts: new Date().toISOString() });
+          if (!r.queued) console.log('[qbwc] inventoryQuery ya pendiente; no se encola otro', { queueLength: r.length });
         }
 
 

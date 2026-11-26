@@ -209,6 +209,50 @@ async function enqueueJob(job) {
   });
 }
 
+// Encola solo si no hay otro job del mismo tipo esperando. Evita que cada
+// authenticate del Web Connector apile un inventoryQuery mientras la cola está
+// detenida (tras días sin procesar, cientos de consultas de catálogo completo).
+async function enqueueUnlessPending(job) {
+  return withJobsLock(async (jobs) => {
+    if (!job || typeof job !== 'object') return { queued: false, length: jobs.length };
+    if (jobs.some((j) => j && j.type === job.type)) {
+      return { queued: false, length: jobs.length };
+    }
+    jobs.push(job);
+    return { queued: true, length: jobs.length };
+  });
+}
+
+function countByType(jobs) {
+  const out = {};
+  for (const j of jobs) {
+    const t = (j && j.type) || 'unknown';
+    out[t] = (out[t] || 0) + 1;
+  }
+  return out;
+}
+
+// Deja un solo inventoryQuery (al final, para que el snapshot refleje los
+// pedidos que se procesen antes) y conserva el resto de jobs en su orden.
+async function compactInventoryQueries({ dryRun = false } = {}) {
+  const run = (jobs) => {
+    const before = countByType(jobs);
+    const others = jobs.filter((j) => !(j && j.type === 'inventoryQuery'));
+    const lastInv = [...jobs].reverse().find((j) => j && j.type === 'inventoryQuery');
+    const next = lastInv ? others.concat([lastInv]) : others;
+    return { before, after: countByType(next), removed: jobs.length - next.length, next };
+  };
+  if (dryRun) {
+    const { next, ...summary } = run(readJobs());
+    return { dryRun: true, ...summary };
+  }
+  return withJobsLock(async (jobs) => {
+    const { next, ...summary } = run(jobs);
+    jobs.splice(0, jobs.length, ...next);
+    return { dryRun: false, ...summary };
+  });
+}
+
 function peekJob() {
   const jobs = readJobs();
   return jobs.length ? jobs[0] : null;
@@ -256,6 +300,9 @@ module.exports = {
   writeJobs,
   withJobsLock,
   enqueueJob,
+  enqueueUnlessPending,
+  compactInventoryQueries,
+  countByType,
   peekJob,
   popJob,
   setCurrentJob,
