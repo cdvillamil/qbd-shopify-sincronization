@@ -14,6 +14,8 @@ const { buildSalesReceiptXML } = require('./services/qbd.salesReceipt');
 const { buildInvoiceXML } = require('./services/qbd.invoice');
 const { buildCreditMemoXML } = require('./services/qbd.creditMemo');
 const { buildItemInventoryModXML } = require('./services/qbd.itemMod');
+const { analyzeQbResponse } = require('./services/qbResponse');
+const { recordFailedJob, readFailed, takeFailed, retryFailed } = require('./services/failedJobs');
 const {
   readJobs,
   enqueueJob,
@@ -361,6 +363,27 @@ app.get('/debug/queue/summary', (_req,res)=>{
   const jobs = readJobs();
   res.json({ total: jobs.length, byType: countByType(jobs), next: jobs[0] || null });
 });
+// Jobs que QB rechazó o que quedaron sin confirmar (antes se perdían).
+app.get('/debug/failed-jobs', (_req,res)=>{
+  const list = readFailed();
+  res.json({ total: list.length, items: list });
+});
+// POST /debug/failed-jobs/retry?id=a,b  (o ?all=1): reencola tras corregir la causa.
+app.post('/debug/failed-jobs/retry', async (req,res)=>{
+  try {
+    const all = /^(1|true|yes)$/i.test(String(req.query.all || ''));
+    const ids = String(req.query.id || '').split(',').map(s=>s.trim()).filter(Boolean);
+    if (!all && !ids.length) return res.status(400).json({ error:'Indica ?id=<id>[,<id>] o ?all=1' });
+    res.json({ ok:true, ...(await retryFailed(all ? null : ids)) });
+  } catch (e) { res.status(500).json({ error:String(e?.message||e) }); }
+});
+// POST /debug/failed-jobs/dismiss?id=a,b: quitar del registro (p.ej. si se creó a mano en QB).
+app.post('/debug/failed-jobs/dismiss', (req,res)=>{
+  const ids = String(req.query.id || '').split(',').map(s=>s.trim()).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error:'Indica ?id=<id>[,<id>]' });
+  const removed = takeFailed(ids);
+  res.json({ ok:true, dismissed: removed.map(e=>({ id:e.id, type:e.job.type, memo:e.job.payload?.memo ?? null })) });
+});
 // Deja un solo inventoryQuery al final y conserva pedidos/ajustes en orden.
 // POST /debug/queue/compact?dryRun=1 solo muestra el resultado.
 app.post('/debug/queue/compact', async (req,res)=>{
@@ -516,6 +539,21 @@ app.post(BASE_PATH, (req,res)=>{
 
       }
       else if (is('sendRequestXML')) {
+        // Si quedó un job "en curso" sin receiveResponseXML, el ciclo anterior se
+        // cortó (502, reinicio, WC cerrado). Ya salió de la cola: lo registramos
+        // para revisión manual en vez de perderlo. No se reintenta solo porque
+        // QB pudo haberlo creado y se duplicaría.
+        const stale = getCurrentJob();
+        if (stale) {
+          if (stale.type !== 'inventoryQuery') {
+            recordFailedJob(stale, {
+              status: 'unconfirmed',
+              error: 'El ciclo del Web Connector se cortó antes de recibir la respuesta de QuickBooks',
+            });
+          }
+          clearCurrentJob();
+        }
+
         // ¿Hay trabajo en cola?
         let job = peekJob();
         let qbxml = '';
@@ -575,6 +613,19 @@ app.post(BASE_PATH, (req,res)=>{
 
         // Leer job actual para decidir parseo
         const current = getCurrentJob();
+
+        // Facturas, recibos, notas crédito y ajustes: si QB los rechazó, ya
+        // salieron de la cola, así que se guardan en failed-jobs.json (+ correo).
+        if (current && current.type !== 'inventoryQuery') {
+          const { errors: qbErrors } = analyzeQbResponse(resp);
+          const reasons = [];
+          if (hresult && hresult !== '0') reasons.push(`HRESULT: ${hresult}`);
+          if (message) reasons.push(`Message: ${message}`);
+          qbErrors.forEach((e) => reasons.push(`${e.node} statusCode=${e.code}${e.message ? ` "${e.message}"` : ''}`));
+          if (reasons.length) {
+            recordFailedJob(current, { status: 'failed', error: reasons.join(' | ') });
+          }
+        }
         // Solo si el job fue de inventario, persistimos snapshot y (opcional) auto-push
         if (current && current.type === 'inventoryQuery') {
           const parsedItems = parseInventorySnapshot(resp);
